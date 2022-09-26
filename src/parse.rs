@@ -97,7 +97,7 @@ pub enum Item {
     Mod {
         name: String,
         vis: Visibility,
-        content: Mod,
+        content: Option<Mod>,
     },
     Adt {
         attrs: Vec<Meta>,
@@ -1145,7 +1145,9 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                         ty: TokenType::Symbol,
                         tok,
                         ..
-                    } if tok == ";" => todo!("Out of line modules"),
+                    } if tok == ";" => {
+                        Some(Item::Mod { name, vis, content: None })
+                    },
                     Lexeme::Group {
                         ty: GroupType::Braces,
                         inner,
@@ -1153,7 +1155,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                     } => Some(Item::Mod {
                         name,
                         vis,
-                        content: parse_mod(inner.into_iter(), attrs),
+                        content: Some(parse_mod(inner.into_iter(), attrs)),
                     }),
                     tok => panic!("Unexpected Token {:?}", tok),
                 }
@@ -1271,7 +1273,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                                 } => tok,
                                 tok => panic!("Unexpected Token {:?}", tok),
                             };
-                            let ctor = parse_struct_body(&mut it);
+                            let ctor = parse_struct_body(&mut it,true);
                             let discrim = match it.peek() {
                                 Some(Lexeme::Token {
                                     ty: TokenType::Symbol,
@@ -1379,7 +1381,7 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
             ty: TokenType::Symbol,
             tok,
             ..
-        } if tok == "<" => parse_generic_decl(it),
+        } if tok == "<" => {it.next(); parse_generic_decl(it)},
         _ => Vec::new(),
     };
 
@@ -1428,7 +1430,7 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
         where_bounds,
     };
 
-    let body = parse_struct_body(it);
+    let body = parse_struct_body(it,false);
 
     match body {
         StructBody::Tuple(_) | StructBody::Unit => match it.next().unwrap() {
@@ -1452,13 +1454,19 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
     }
 }
 
-pub fn parse_struct_body<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> StructBody {
-    match it.peek().unwrap() {
-        Lexeme::Token {
+pub fn parse_struct_body<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>, is_enum_ctor: bool) -> StructBody {
+    match it.peek() {
+        Some(Lexeme::Token {
             ty: TokenType::Symbol,
             tok,
             ..
-        } if tok == ";" || tok == "," => return StructBody::Unit,
+        }) if tok == ";" && !is_enum_ctor => return StructBody::Unit,
+        Some(Lexeme::Token {
+            ty: TokenType::Symbol,
+            tok,
+            ..
+        }) if tok == "," && is_enum_ctor => return StructBody::Unit,
+        None if is_enum_ctor => return StructBody::Unit,
         _ => {}
     }
 
@@ -2030,32 +2038,8 @@ pub fn parse_impl_item<I: Iterator<Item = Lexeme>>(
             tok,
             ..
         } if tok == "<" => {
-            let mut is_path_prefix = false;
-            match it.peek_next() {
-                Some(Lexeme::Token {
-                    ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Raw),
-                    ..
-                }) => match it.peek_next() {
-                    Some(Lexeme::Token {
-                        ty: TokenType::Symbol,
-                        tok,
-                        ..
-                    }) if tok == ":" || tok == "," || tok == ">" => {}
-                    _ => is_path_prefix = true,
-                },
-                Some(Lexeme::Token {
-                    ty: TokenType::Lifetime,
-                    ..
-                }) => {}
-                _ => is_path_prefix = true,
-            }
-            it.reset_cursor();
-            if is_path_prefix {
-                Vec::new()
-            } else {
-                it.next();
-                parse_generic_decl(it)
-            }
+           it.next();
+           parse_generic_decl(it)
         }
         _ => Vec::new(),
     };
@@ -2754,6 +2738,19 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
             it.next();
             Some(Pattern::Discard)
         }
+        Lexeme::Token {ty: TokenType::Symbol, tok, ..} if tok=="&" => {
+            it.next();
+
+            let mutability = match it.peek(){
+                Some(Lexeme::Token { ty: TokenType::Identifier(IdentifierKind::Keyword), tok, .. }) if tok=="mut" => {
+                    it.next();
+                    Mutability::Mut
+                }
+                _ => Mutability::Const
+            };
+
+            Some(Pattern::Ref(mutability, Box::new(parse_pattern(it)?)))
+        }
         Lexeme::Group { .. } => match it.next().unwrap() {
             Lexeme::Group {
                 ty: GroupType::Parentheses,
@@ -2796,7 +2793,23 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
             } => todo!("slice patterns"),
             tok => panic!("Unexpected token {:?}", tok),
         },
-        _ => {
+        tok => {
+
+            match tok {
+                Lexeme::Token { ty: TokenType::Identifier(IdentifierKind::Keyword), tok, .. } if tok == "self" => {
+                    match it.peek_next(){
+                        Some(Lexeme::Token { ty: TokenType::Symbol, tok, .. }) if tok!="::" => {
+                            it.reset_cursor();
+                            it.next();
+                            return Some(Pattern::SelfPat)
+                        }
+                        _ => {
+                            it.reset_cursor()
+                        }
+                    }
+                },
+                _ => {}
+            }
             let path = parse_path(it);
 
             match it.peek() {

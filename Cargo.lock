@@ -84,6 +84,7 @@ dependencies = [
  "llhd",
  "peekmore",
  "unicode-xid",
+ "utf",
 ]
 
 [[package]]
@@ -503,6 +504,12 @@ name = "unicode-xid"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "957e51f3646910546462e67d5f7599b9e4fb8acdd304b087a6494730f9eebf04"
+
+[[package]]
+name = "utf"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8704f91734e57e97633bff5afe5c2893e5aca5bd83fac44736460deca2611a76"
 
 [[package]]
 name = "vec_map"
