@@ -1,6 +1,7 @@
 pub mod lex;
 pub mod parse;
 pub mod expander;
+pub mod sema;
 
 use std::{io::Read, path::PathBuf};
 

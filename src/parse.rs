@@ -2655,13 +2655,15 @@ pub fn parse_path<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> P
             ..
         } if tok == "Self" => {
             it.next();
-            match it.next().unwrap() {
-                Lexeme::Token {
+            match it.peek() {
+                Some(Lexeme::Token {
                     ty: TokenType::Symbol,
                     tok,
                     ..
-                } if tok == "::" => {}
-                tok => panic!("Unexpected token {:?}", tok),
+                }) if tok == "::" => {}
+                _ => {
+                    return Path{root: Some(PathRoot::SelfTy),components: Vec::new()}
+                },
             }
             Some(PathRoot::SelfPath)
         }
