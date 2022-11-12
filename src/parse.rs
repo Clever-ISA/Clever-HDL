@@ -3306,44 +3306,41 @@ pub fn parse_expr<I: Iterator<Item = Lexeme>>(
     }
 }
 
-lazy_static::lazy_static! {
-    static ref OPERATOR_MAP: HashMap<&'static str,(usize,usize,BinaryOp)> = {
-        let mut map = HashMap::new();
-        map.insert("=",(2,1,BinaryOp::Assign));
-        map.insert("+=",(2,1,BinaryOp::AddAssign));
-        map.insert("-=",(2,1,BinaryOp::SubAssign));
-        map.insert("*=",(2,1,BinaryOp::MulAssign));
-        map.insert("/=",(2,1,BinaryOp::DivAssign));
-        map.insert("%=",(2,1,BinaryOp::ModAssign));
-        map.insert("&=",(2,1,BinaryOp::AndAssign));
-        map.insert("|=",(2,1,BinaryOp::OrAssign));
-        map.insert("^=",(2,1,BinaryOp::XorAssign));
-        map.insert("<<=",(2,1,BinaryOp::LshAssign));
-        map.insert(">>=",(2,1,BinaryOp::RshAssign));
-        map.insert("..",(3,3,BinaryOp::Range));
-        map.insert("..=",(3,3,BinaryOp::RangeInclusive));
-        map.insert("||",(5,6,BinaryOp::BooleanOr));
-        map.insert("&&",(7,8,BinaryOp::BooleanAnd));
-        map.insert("==",(9,9,BinaryOp::CompareEq));
-        map.insert("!=",(9,9,BinaryOp::CompareNe));
-        map.insert("<",(9,9,BinaryOp::CompareLt));
-        map.insert(">",(9,9,BinaryOp::CompareGt));
-        map.insert("<=",(9,9,BinaryOp::CompareLe));
-        map.insert(">=",(9,9,BinaryOp::CompareGe));
-        map.insert("|",(11,12,BinaryOp::Or));
-        map.insert("^",(13,14,BinaryOp::Xor));
-        map.insert("&",(15,16,BinaryOp::And));
-        map.insert("<<",(17,18,BinaryOp::Lsh));
-        map.insert(">>",(17,18,BinaryOp::Rsh));
-        map.insert("+",(19,20,BinaryOp::Add));
-        map.insert("-",(19,20,BinaryOp::Subtract));
-        map.insert("*",(21,22,BinaryOp::Multiply));
-        map.insert("/",(21,22,BinaryOp::Divide));
-        map.insert("%",(21,22,BinaryOp::Modulus));
-
-        map
-
-    };
+fn get_module_definition(sym: &str) -> Option<(usize,usize,BinaryOp)>{
+    match sym{
+        "=" => Some((2,1,BinaryOp::Assign)),
+        "+=" => Some((2,1,BinaryOp::AddAssign)),
+        "-=" => Some((2,1,BinaryOp::SubAssign)),
+        "*=" => Some((2,1,BinaryOp::MulAssign)),
+        "/=" => Some((2,1,BinaryOp::DivAssign)),
+        "%=" => Some((2,1,BinaryOp::ModAssign)),
+        "&=" => Some((2,1,BinaryOp::AndAssign)),
+        "|=" => Some((2,1,BinaryOp::OrAssign)),
+        "^=" => Some((2,1,BinaryOp::XorAssign)),
+        "<<=" => Some((2,1,BinaryOp::LshAssign)),
+        ">>=" => Some((2,1,BinaryOp::RshAssign)),
+        ".." => Some((3,3,BinaryOp::Range)),
+        "..=" => Some((3,3,BinaryOp::RangeInclusive)),
+        "||" => Some((5,6,BinaryOp::BooleanOr)),
+        "&&" => Some((7,8,BinaryOp::BooleanAnd)),
+        "==" => Some((9,9,BinaryOp::CompareEq)),
+        "!=" => Some((9,9,BinaryOp::CompareNe)),
+        "<" => Some((9,9,BinaryOp::CompareLt)),
+        ">" => Some((9,9,BinaryOp::CompareGt)),
+        "<=" => Some((9,9,BinaryOp::CompareLe)),
+        ">=" => Some((9,9,BinaryOp::CompareGe)),
+        "|" => Some((11,12,BinaryOp::Or)),
+        "^" => Some((13,14,BinaryOp::Xor)),
+        "&" => Some((15,16,BinaryOp::And)),
+        "<<" => Some((17,18,BinaryOp::Lsh)),
+        ">>" => Some((17,18,BinaryOp::Rsh)),
+        "+" => Some((19,20,BinaryOp::Add)),
+        "-" => Some((19,20,BinaryOp::Subtract)),
+        "*" => Some((21,22,BinaryOp::Multiply)),
+        "/" => Some((21,22,BinaryOp::Divide)),
+        "%" => Some((21,22,BinaryOp::Modulus)),
+        _ => None,
+    }
 }
 
 pub fn parse_binary_expr<I: Iterator<Item = Lexeme>>(
@@ -3360,7 +3357,7 @@ pub fn parse_binary_expr<I: Iterator<Item = Lexeme>>(
                 tok,
                 ..
             }) => {
-                if let Some((lbp, rbp, op)) = OPERATOR_MAP.get(&**tok).copied() {
+                if let Some((lbp, rbp, op)) = get_module_definition(tok) {
                     match lbp.cmp(&precedence){
                         Ordering::Equal => panic!("Cannot chain comparison operators"),
                         Ordering::Less => break,

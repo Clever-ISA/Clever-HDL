@@ -8,6 +8,8 @@ use std::{io::Read, path::PathBuf};
 
 use expander::ModuleSearch;
 
+use crate::sema::{Definitions, analyze_crate};
+
 macro_rules! unwrap_or_error{
     ($val:expr, $($fmt:tt)*) => {
         match $val{
@@ -122,4 +124,10 @@ fn main() {
 
     unwrap_or_error!(expander::find_modules(&mut file, &mut search),"Cannot open {} for reading: {error}",search.error_search().display());
     
+    let mut defs = Definitions::new();
+
+    analyze_crate(&mut defs, &file);
+
+    println!("All definitions: {:#?}",defs);
+
 }
