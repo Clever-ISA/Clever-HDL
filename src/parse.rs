@@ -1,19 +1,21 @@
 #![allow(dead_code, clippy::module_name_repetitions)] // For now
 use peekmore::{PeekMore, PeekMoreIterator};
-use std::{collections::HashMap, cmp::Ordering};
+use std::{cmp::Ordering, collections::HashMap};
 
-use crate::{
-    lex::{GroupType, IdentifierKind, Lexeme, TokenType},
-};
+use crate::lex::{GroupType, IdentifierKind, Lexeme, TokenType};
 
 pub use crate::lex::{CharType, StrType};
 
 use std::fmt::{self, Display, Formatter};
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Visibility {
     None,
     Pub,
+    Priv,
+    Crate,
+    Super,
+    In(SimplePath),
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -42,7 +44,7 @@ pub enum Mutability {
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum SignalDirection{
+pub enum SignalDirection {
     In,
     Out,
     Inout,
@@ -62,6 +64,14 @@ pub struct SimplePath {
     pub idents: Vec<String>,
 }
 
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum AsyncFnTy{
+    Normal,
+    Async,
+    Entity,
+    Procedure
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Item {
     ExternBlock {
@@ -73,7 +83,7 @@ pub enum Item {
         attrs: Vec<Meta>,
         visibility: Visibility,
         is_const: bool,
-        is_async: bool,
+        is_async: AsyncFnTy,
         safety: Safety,
         abi: Option<String>,
         name: String,
@@ -135,13 +145,22 @@ pub enum Item {
         attrs: Vec<Meta>,
         vis: Visibility,
         name: Pattern,
+        ty: Type,
         init: Expr,
     },
     Const {
         attrs: Vec<Meta>,
         vis: Visibility,
         name: Pattern,
+        ty: Type,
         init: Option<Expr>,
+    },
+    Signal {
+        attrs: Vec<Meta>,
+        vis: Visibility,
+        direction: SignalDirection,
+        name: String,
+        ty: Type,
     },
 }
 
@@ -255,8 +274,8 @@ pub struct FnParam {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Pattern {
     Discard,
-    Ident(String),
-    Binding(String, Box<Pattern>),
+    Ident(Mutability, String),
+    Binding(Mutability, String, Box<Pattern>),
     Ref(Mutability, Box<Pattern>),
     Unref(Mutability, Box<Pattern>),
     Parentheses(Box<Pattern>),
@@ -396,7 +415,7 @@ pub enum BinaryOp {
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum TriggerType{
+pub enum TriggerType {
     RisingEdge,
     FallingEdge,
     HighSignal,
@@ -469,8 +488,6 @@ pub enum Block {
     Try(Vec<BlockItem>),
 }
 
-
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Expr {
     Block(Block),
@@ -492,7 +509,7 @@ pub enum Expr {
     StructConstructor(Path, Vec<StructFieldInitializer>),
     Field(Box<Expr>, FieldName),
     Await(Box<Expr>),
-    AwaitSignal(TriggerType,Box<Expr>),
+    AwaitSignal(TriggerType, Box<Expr>),
     Return(Option<Box<Expr>>),
     Break(Option<Lifetime>, Option<Box<Expr>>),
     Continue(Option<Lifetime>),
@@ -735,7 +752,43 @@ pub fn parse_visibility<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>
                 Some(Lexeme::Group {
                     ty: GroupType::Parentheses,
                     ..
-                }) => todo!("pub(<path>)"),
+                }) => match it.next() {
+                    Some(Lexeme::Group {
+                        ty: GroupType::Parentheses,
+                        inner,
+                        ..
+                    }) => {
+                        let mut it = inner.into_iter().peekmore();
+
+                        match it.next().unwrap() {
+                            Lexeme::Token {
+                                ty: TokenType::Identifier(IdentifierKind::Keyword),
+                                tok,
+                                ..
+                            } if tok == "self" => Visibility::Priv,
+                            Lexeme::Token {
+                                ty: TokenType::Identifier(IdentifierKind::Keyword),
+                                tok,
+                                ..
+                            } if tok == "super" => Visibility::Super,
+                            Lexeme::Token {
+                                ty: TokenType::Identifier(IdentifierKind::Keyword),
+                                tok,
+                                ..
+                            } if tok == "crate" => Visibility::Crate,
+                            Lexeme::Token {
+                                ty: TokenType::Identifier(IdentifierKind::Keyword),
+                                tok,
+                                ..
+                            } if tok == "in" => {
+                                let path = parse_simple_path(&mut it);
+                                Visibility::In(path)
+                            }
+                            tok => panic!("Unexpected token {:?}", tok),
+                        }
+                    }
+                    _ => unreachable!(),
+                },
                 _ => Visibility::Pub,
             }
         }
@@ -814,6 +867,64 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                     tok
                 ),
             }
+        }
+        Lexeme::Token {
+            ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+            tok,
+            ..
+        } if tok == "signal" => {
+            it.next();
+            let direction = match it.next().unwrap() {
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword),
+                    tok,
+                    ..
+                } if tok == "in" => SignalDirection::In,
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword),
+                    tok,
+                    ..
+                } if tok == "out" => SignalDirection::Out,
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword),
+                    tok,
+                    ..
+                } if tok == "inout" => SignalDirection::Inout,
+                tok => panic!("Unexpected token {:?}", tok),
+            };
+            let name = match it.next().unwrap() {
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Raw),
+                    tok,
+                    ..
+                } => tok,
+                tok => panic!("Unexpected token {:?}", tok),
+            };
+            let ty = match it.next().unwrap() {
+                Lexeme::Token {
+                    ty: TokenType::Symbol,
+                    tok,
+                    ..
+                } if tok == ":" => parse_type(it).unwrap(),
+                tok => panic!("Unexpected token {:?}", tok),
+            };
+
+            match it.next().unwrap() {
+                Lexeme::Token {
+                    ty: TokenType::Symbol,
+                    tok,
+                    ..
+                } if tok == ";" => {}
+                tok => panic!("Unexpected token {:?}", tok),
+            }
+
+            Some(Item::Signal {
+                attrs,
+                vis,
+                name,
+                direction,
+                ty,
+            })
         }
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
@@ -915,6 +1026,109 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                     it,
                     TypeTag::Union,
                 ))),
+            }
+        }
+        Lexeme::Token {
+            ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+            tok,
+            ..
+        } if tok == "entity" || tok == "proc" => {
+            let union = tok.clone();
+            match it.peek_next() {
+                Some(Lexeme::Token {
+                    ty: TokenType::Symbol,
+                    tok,
+                    ..
+                }) if tok == "::" => {
+                    if vis != Visibility::None {
+                        panic!("Cannot apply visibility {:?} to a macro expansion", vis)
+                    }
+                    it.next();
+                    it.next();
+                    let mut path = parse_simple_path(it);
+                    path.idents.insert(0, union);
+                    match it.next().unwrap() {
+                        Lexeme::Token {
+                            ty: TokenType::Symbol,
+                            tok,
+                            ..
+                        } if tok == "!" => match it.next().unwrap() {
+                            Lexeme::Group {
+                                ty: GroupType::Braces,
+                                inner,
+                                ..
+                            } => Some(Item::MacroExpansion {
+                                attrs,
+                                target: path,
+                                args: inner,
+                            }),
+                            Lexeme::Group { inner, .. } => {
+                                match it.next().unwrap() {
+                                    Lexeme::Token {
+                                        ty: TokenType::Symbol,
+                                        tok,
+                                        ..
+                                    } if tok == ";" => {}
+                                    tok => panic!("Unexpected token {:?}", tok),
+                                };
+                                Some(Item::MacroExpansion {
+                                    attrs,
+                                    target: path,
+                                    args: inner,
+                                })
+                            }
+                            tok => panic!("Unexpected token {:?}", tok),
+                        },
+                        tok => panic!("Unexpected token {:?}", tok),
+                    }
+                }
+                Some(Lexeme::Token {
+                    ty: TokenType::Symbol,
+                    tok,
+                    ..
+                }) if tok == "!" => {
+                    if vis != Visibility::None {
+                        panic!("Cannot apply visibility {:?} to a macro expansion", vis)
+                    }
+                    it.next();
+                    it.next();
+                    let path = SimplePath {
+                        root: None,
+                        idents: vec![union],
+                    };
+                    match it.next().unwrap() {
+                        Lexeme::Group {
+                            ty: GroupType::Braces,
+                            inner,
+                            ..
+                        } => Some(Item::MacroExpansion {
+                            attrs,
+                            target: path,
+                            args: inner,
+                        }),
+                        Lexeme::Group { inner, .. } => {
+                            match it.next().unwrap() {
+                                Lexeme::Token {
+                                    ty: TokenType::Symbol,
+                                    tok,
+                                    ..
+                                } if tok == ";" => {}
+                                tok => panic!("Unexpected token {:?}", tok),
+                            };
+                            Some(Item::MacroExpansion {
+                                attrs,
+                                target: path,
+                                args: inner,
+                            })
+                        }
+                        tok => panic!("Unexpected token {:?}", tok),
+                    }
+                }
+                _ =>{ it.reset_cursor(); Some(parse_fn_item(
+                    vis,
+                    attrs,
+                    it,
+                ))},
             }
         }
         Lexeme::Token {
@@ -1063,10 +1277,26 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                     it.reset_cursor();
                     Some(parse_fn_item(vis, attrs, it))
                 }
+                Some(Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
+                    tok,
+                    ..
+                }) if tok == "entity" || tok=="proc" => {
+                    it.reset_cursor();
+                    Some(parse_fn_item(vis, attrs, it))
+                }
                 _ => {
                     it.reset_cursor();
                     it.next();
                     let name = parse_pattern(it).unwrap();
+                    let ty = match it.next().unwrap() {
+                        Lexeme::Token {
+                            ty: TokenType::Symbol,
+                            tok,
+                            ..
+                        } if tok == ":" => parse_type(it).unwrap(),
+                        tok => panic!("Unexpected token {:?}", tok),
+                    };
                     let init = match it.peek().unwrap() {
                         Lexeme::Token {
                             ty: TokenType::Symbol,
@@ -1092,6 +1322,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                         attrs,
                         vis,
                         name,
+                        ty,
                         init,
                     })
                 }
@@ -1099,6 +1330,14 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
             "static" => {
                 it.next();
                 let name = parse_pattern(it).unwrap();
+                let ty = match it.next().unwrap() {
+                    Lexeme::Token {
+                        ty: TokenType::Symbol,
+                        tok,
+                        ..
+                    } if tok == ":" => parse_type(it).unwrap(),
+                    tok => panic!("Unexpected token {:?}", tok),
+                };
                 match it.next().unwrap() {
                     Lexeme::Token {
                         ty: TokenType::Symbol,
@@ -1109,10 +1348,20 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                 }
                 let init = parse_expr(it, true);
 
+                match it.next().unwrap() {
+                    Lexeme::Token {
+                        ty: TokenType::Symbol,
+                        tok,
+                        ..
+                    } if tok == ";" => {}
+                    tok => panic!("Unexpected token {:?}", tok),
+                }
+
                 Some(Item::Static {
                     attrs,
                     vis,
                     name,
+                    ty,
                     init,
                 })
             }
@@ -1145,9 +1394,11 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                         ty: TokenType::Symbol,
                         tok,
                         ..
-                    } if tok == ";" => {
-                        Some(Item::Mod { name, vis, content: None })
-                    },
+                    } if tok == ";" => Some(Item::Mod {
+                        name,
+                        vis,
+                        content: None,
+                    }),
                     Lexeme::Group {
                         ty: GroupType::Braces,
                         inner,
@@ -1273,7 +1524,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                                 } => tok,
                                 tok => panic!("Unexpected Token {:?}", tok),
                             };
-                            let ctor = parse_struct_body(&mut it,true);
+                            let ctor = parse_struct_body(&mut it, true);
                             let discrim = match it.peek() {
                                 Some(Lexeme::Token {
                                     ty: TokenType::Symbol,
@@ -1381,7 +1632,10 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
             ty: TokenType::Symbol,
             tok,
             ..
-        } if tok == "<" => {it.next(); parse_generic_decl(it)},
+        } if tok == "<" => {
+            it.next();
+            parse_generic_decl(it)
+        }
         _ => Vec::new(),
     };
 
@@ -1430,7 +1684,7 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
         where_bounds,
     };
 
-    let body = parse_struct_body(it,false);
+    let body = parse_struct_body(it, false);
 
     match body {
         StructBody::Tuple(_) | StructBody::Unit => match it.next().unwrap() {
@@ -1454,7 +1708,10 @@ pub fn parse_struct_or_union<I: Iterator<Item = Lexeme>>(
     }
 }
 
-pub fn parse_struct_body<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>, is_enum_ctor: bool) -> StructBody {
+pub fn parse_struct_body<I: Iterator<Item = Lexeme>>(
+    it: &mut PeekMoreIterator<I>,
+    is_enum_ctor: bool,
+) -> StructBody {
     match it.peek() {
         Some(Lexeme::Token {
             ty: TokenType::Symbol,
@@ -1611,6 +1868,7 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
     mut attrs: Vec<Meta>,
     peek: &mut PeekMoreIterator<I>,
 ) -> Item {
+    eprintln!("{:?}",peek.peek());
     let is_const = match peek.peek() {
         Some(Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Keyword),
@@ -1629,9 +1887,9 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
             ..
         }) if tok == "async" => {
             peek.next();
-            true
+            Some(AsyncFnTy::Async)
         }
-        _ => false,
+        _ => None,
     };
     let safety = match peek.peek() {
         Some(Lexeme::Token {
@@ -1651,26 +1909,42 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
             ..
         }) if tok == "extern" => {
             peek.next();
-            match peek.next().unwrap() {
+            match peek.peek().unwrap() {
                 Lexeme::Token {
                     ty: TokenType::String(StrType::Default),
                     tok,
                     ..
-                } => Some(tok),
+                } =>{let tok = tok.clone(); peek.next(); Some(tok)},
                 _ => Some("C".to_string()),
             }
         }
         _ => None,
     };
 
-    match peek.next().unwrap() {
+    let is_async = match peek.next().unwrap() {
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Keyword),
             tok,
             ..
-        } if tok == "fn" => {}
+        } if tok == "fn" => {
+            is_async.unwrap_or(AsyncFnTy::Normal)
+        }
+        Lexeme::Token {
+            ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
+            tok,
+            ..
+        } if tok == "entity" => {
+            AsyncFnTy::Entity
+        }
+        Lexeme::Token {
+            ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
+            tok,
+            ..
+        } if tok == "proc" => {
+            AsyncFnTy::Procedure
+        }
         tok => panic!("Unexpected token {:?}", tok),
-    }
+    };
     let name = match peek.next().expect("Invalid Item") {
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Raw),
@@ -2029,7 +2303,7 @@ pub fn parse_impl_item<I: Iterator<Item = Lexeme>>(
             tok,
             ..
         } if tok == "impl" => {}
-        tok => panic!("Unexpected token {:?}",tok),
+        tok => panic!("Unexpected token {:?}", tok),
     }
 
     let generics = match it.peek().unwrap() {
@@ -2038,8 +2312,8 @@ pub fn parse_impl_item<I: Iterator<Item = Lexeme>>(
             tok,
             ..
         } if tok == "<" => {
-           it.next();
-           parse_generic_decl(it)
+            it.next();
+            parse_generic_decl(it)
         }
         _ => Vec::new(),
     };
@@ -2058,7 +2332,7 @@ pub fn parse_impl_item<I: Iterator<Item = Lexeme>>(
                     tok,
                     ..
                 } if tok == "for" => {}
-                tok => panic!("Unexpected token {:?}",tok),
+                tok => panic!("Unexpected token {:?}", tok),
             }
             (Some(bound), parse_type(it).unwrap())
         }
@@ -2099,7 +2373,7 @@ pub fn parse_impl_item<I: Iterator<Item = Lexeme>>(
                     tok,
                     ..
                 } if tok == "for" => {}
-                tok => panic!("Unexpected token {:?}",tok),
+                tok => panic!("Unexpected token {:?}", tok),
             }
             (Some(bound), parse_type(it).unwrap())
         }
@@ -2662,8 +2936,11 @@ pub fn parse_path<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> P
                     ..
                 }) if tok == "::" => {}
                 _ => {
-                    return Path{root: Some(PathRoot::SelfTy),components: Vec::new()}
-                },
+                    return Path {
+                        root: Some(PathRoot::SelfTy),
+                        components: Vec::new(),
+                    }
+                }
             }
             Some(PathRoot::SelfPath)
         }
@@ -2740,15 +3017,23 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
             it.next();
             Some(Pattern::Discard)
         }
-        Lexeme::Token {ty: TokenType::Symbol, tok, ..} if tok=="&" => {
+        Lexeme::Token {
+            ty: TokenType::Symbol,
+            tok,
+            ..
+        } if tok == "&" => {
             it.next();
 
-            let mutability = match it.peek(){
-                Some(Lexeme::Token { ty: TokenType::Identifier(IdentifierKind::Keyword), tok, .. }) if tok=="mut" => {
+            let mutability = match it.peek() {
+                Some(Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword),
+                    tok,
+                    ..
+                }) if tok == "mut" => {
                     it.next();
                     Mutability::Mut
                 }
-                _ => Mutability::Const
+                _ => Mutability::Const,
             };
 
             Some(Pattern::Ref(mutability, Box::new(parse_pattern(it)?)))
@@ -2795,20 +3080,55 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
             } => todo!("slice patterns"),
             tok => panic!("Unexpected token {:?}", tok),
         },
-        tok => {
+        Lexeme::Token {
+            ty: TokenType::Identifier(IdentifierKind::Keyword),
+            tok,
+            ..
+        } if tok == "mut" => {
+            it.next();
+            match it.next().unwrap() {
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Raw),
+                    tok,
+                    ..
+                } => {
+                    let id = tok;
 
-            match tok {
-                Lexeme::Token { ty: TokenType::Identifier(IdentifierKind::Keyword), tok, .. } if tok == "self" => {
-                    match it.peek_next(){
-                        Some(Lexeme::Token { ty: TokenType::Symbol, tok, .. }) if tok!="::" => {
-                            it.reset_cursor();
+                    match it.peek() {
+                        Some(Lexeme::Token {
+                            ty: TokenType::Symbol,
+                            tok,
+                            ..
+                        }) if tok == "@" => {
                             it.next();
-                            return Some(Pattern::SelfPat)
+
+                            let inner = parse_pattern(it).unwrap();
+
+                            Some(Pattern::Binding(Mutability::Mut, id, Box::new(inner)))
                         }
-                        _ => {
-                            it.reset_cursor()
-                        }
+                        _ => Some(Pattern::Ident(Mutability::Mut, id)),
                     }
+                }
+                tok => panic!("Unexpected token {:?}", tok),
+            }
+        }
+        tok => {
+            match tok {
+                Lexeme::Token {
+                    ty: TokenType::Identifier(IdentifierKind::Keyword),
+                    tok,
+                    ..
+                } if tok == "self" => match it.peek_next() {
+                    Some(Lexeme::Token {
+                        ty: TokenType::Symbol,
+                        tok,
+                        ..
+                    }) if tok != "::" => {
+                        it.reset_cursor();
+                        it.next();
+                        return Some(Pattern::SelfPat);
+                    }
+                    _ => it.reset_cursor(),
                 },
                 _ => {}
             }
@@ -2916,9 +3236,11 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
                 }) if tok == "@" => {
                     let pat = parse_pattern(it).unwrap();
                     match (&path.root, &*path.components) {
-                        (None, [PathComponent::Id(id)]) => {
-                            Some(Pattern::Binding(id.clone(), Box::new(pat)))
-                        }
+                        (None, [PathComponent::Id(id)]) => Some(Pattern::Binding(
+                            Mutability::Const,
+                            id.clone(),
+                            Box::new(pat),
+                        )),
                         _ => panic!("Cannot create pinding with path {:?}", path),
                     }
                 }
@@ -2927,7 +3249,9 @@ pub fn parse_pattern<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -
                         Some(Pattern::SelfPat)
                     } else if path.root == None && path.components.len() == 1 {
                         match &*path.components {
-                            [PathComponent::Id(id)] => Some(Pattern::Ident(id.clone())),
+                            [PathComponent::Id(id)] => {
+                                Some(Pattern::Ident(Mutability::Const, id.clone()))
+                            }
                             _ => unreachable!(),
                         }
                     } else {
@@ -3011,7 +3335,7 @@ pub fn parse_type<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> O
                 } if tok == "in" => {
                     it.next();
                     let underlying = parse_type(it).unwrap();
-                    Some(Type::Signal  {
+                    Some(Type::Signal {
                         direction: SignalDirection::In,
                         lifetime,
                         underlying: Box::new(underlying),
@@ -3024,7 +3348,7 @@ pub fn parse_type<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> O
                 } if tok == "out" => {
                     it.next();
                     let underlying = parse_type(it).unwrap();
-                    Some(Type::Signal  {
+                    Some(Type::Signal {
                         direction: SignalDirection::Out,
                         lifetime,
                         underlying: Box::new(underlying),
@@ -3037,7 +3361,7 @@ pub fn parse_type<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> O
                 } if tok == "inout" => {
                     it.next();
                     let underlying = parse_type(it).unwrap();
-                    Some(Type::Signal  {
+                    Some(Type::Signal {
                         direction: SignalDirection::Inout,
                         lifetime,
                         underlying: Box::new(underlying),
@@ -3050,7 +3374,7 @@ pub fn parse_type<I: Iterator<Item = Lexeme>>(it: &mut PeekMoreIterator<I>) -> O
                         lifetime,
                         underlying: Box::new(underlying),
                     })
-                },
+                }
             }
         }
         Lexeme::Group {
@@ -3306,39 +3630,39 @@ pub fn parse_expr<I: Iterator<Item = Lexeme>>(
     }
 }
 
-fn get_module_definition(sym: &str) -> Option<(usize,usize,BinaryOp)>{
-    match sym{
-        "=" => Some((2,1,BinaryOp::Assign)),
-        "+=" => Some((2,1,BinaryOp::AddAssign)),
-        "-=" => Some((2,1,BinaryOp::SubAssign)),
-        "*=" => Some((2,1,BinaryOp::MulAssign)),
-        "/=" => Some((2,1,BinaryOp::DivAssign)),
-        "%=" => Some((2,1,BinaryOp::ModAssign)),
-        "&=" => Some((2,1,BinaryOp::AndAssign)),
-        "|=" => Some((2,1,BinaryOp::OrAssign)),
-        "^=" => Some((2,1,BinaryOp::XorAssign)),
-        "<<=" => Some((2,1,BinaryOp::LshAssign)),
-        ">>=" => Some((2,1,BinaryOp::RshAssign)),
-        ".." => Some((3,3,BinaryOp::Range)),
-        "..=" => Some((3,3,BinaryOp::RangeInclusive)),
-        "||" => Some((5,6,BinaryOp::BooleanOr)),
-        "&&" => Some((7,8,BinaryOp::BooleanAnd)),
-        "==" => Some((9,9,BinaryOp::CompareEq)),
-        "!=" => Some((9,9,BinaryOp::CompareNe)),
-        "<" => Some((9,9,BinaryOp::CompareLt)),
-        ">" => Some((9,9,BinaryOp::CompareGt)),
-        "<=" => Some((9,9,BinaryOp::CompareLe)),
-        ">=" => Some((9,9,BinaryOp::CompareGe)),
-        "|" => Some((11,12,BinaryOp::Or)),
-        "^" => Some((13,14,BinaryOp::Xor)),
-        "&" => Some((15,16,BinaryOp::And)),
-        "<<" => Some((17,18,BinaryOp::Lsh)),
-        ">>" => Some((17,18,BinaryOp::Rsh)),
-        "+" => Some((19,20,BinaryOp::Add)),
-        "-" => Some((19,20,BinaryOp::Subtract)),
-        "*" => Some((21,22,BinaryOp::Multiply)),
-        "/" => Some((21,22,BinaryOp::Divide)),
-        "%" => Some((21,22,BinaryOp::Modulus)),
+fn get_module_definition(sym: &str) -> Option<(usize, usize, BinaryOp)> {
+    match sym {
+        "=" => Some((2, 1, BinaryOp::Assign)),
+        "+=" => Some((2, 1, BinaryOp::AddAssign)),
+        "-=" => Some((2, 1, BinaryOp::SubAssign)),
+        "*=" => Some((2, 1, BinaryOp::MulAssign)),
+        "/=" => Some((2, 1, BinaryOp::DivAssign)),
+        "%=" => Some((2, 1, BinaryOp::ModAssign)),
+        "&=" => Some((2, 1, BinaryOp::AndAssign)),
+        "|=" => Some((2, 1, BinaryOp::OrAssign)),
+        "^=" => Some((2, 1, BinaryOp::XorAssign)),
+        "<<=" => Some((2, 1, BinaryOp::LshAssign)),
+        ">>=" => Some((2, 1, BinaryOp::RshAssign)),
+        ".." => Some((3, 3, BinaryOp::Range)),
+        "..=" => Some((3, 3, BinaryOp::RangeInclusive)),
+        "||" => Some((5, 6, BinaryOp::BooleanOr)),
+        "&&" => Some((7, 8, BinaryOp::BooleanAnd)),
+        "==" => Some((9, 9, BinaryOp::CompareEq)),
+        "!=" => Some((9, 9, BinaryOp::CompareNe)),
+        "<" => Some((9, 9, BinaryOp::CompareLt)),
+        ">" => Some((9, 9, BinaryOp::CompareGt)),
+        "<=" => Some((9, 9, BinaryOp::CompareLe)),
+        ">=" => Some((9, 9, BinaryOp::CompareGe)),
+        "|" => Some((11, 12, BinaryOp::Or)),
+        "^" => Some((13, 14, BinaryOp::Xor)),
+        "&" => Some((15, 16, BinaryOp::And)),
+        "<<" => Some((17, 18, BinaryOp::Lsh)),
+        ">>" => Some((17, 18, BinaryOp::Rsh)),
+        "+" => Some((19, 20, BinaryOp::Add)),
+        "-" => Some((19, 20, BinaryOp::Subtract)),
+        "*" => Some((21, 22, BinaryOp::Multiply)),
+        "/" => Some((21, 22, BinaryOp::Divide)),
+        "%" => Some((21, 22, BinaryOp::Modulus)),
         _ => None,
     }
 }
@@ -3358,10 +3682,10 @@ pub fn parse_binary_expr<I: Iterator<Item = Lexeme>>(
                 ..
             }) => {
                 if let Some((lbp, rbp, op)) = get_module_definition(tok) {
-                    match lbp.cmp(&precedence){
+                    match lbp.cmp(&precedence) {
                         Ordering::Equal => panic!("Cannot chain comparison operators"),
                         Ordering::Less => break,
-                        Ordering::Greater => {},
+                        Ordering::Greater => {}
                     }
 
                     it.next();
@@ -3564,30 +3888,53 @@ pub fn parse_field_expr<I: Iterator<Item = Lexeme>>(
                         ty: TokenType::Identifier(IdentifierKind::Keyword),
                         tok,
                         ..
-                    } if tok == "await" => {
-                        match it.peek(){
-                            Some(Lexeme::Token{ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),tok,..}) if tok=="rising_edge" => {
-                                it.next();
-                                expr = Expr::AwaitSignal(TriggerType::RisingEdge, Box::new(expr))
-                            }
-                            Some(Lexeme::Token{ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),tok,..}) if tok=="falling_edge" => {
-                                it.next();
-                                expr = Expr::AwaitSignal(TriggerType::FallingEdge, Box::new(expr))
-                            }
-                            Some(Lexeme::Token{ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),tok,..}) if tok=="low_signal" => {
-                                it.next();
-                                expr = Expr::AwaitSignal(TriggerType::LowSignal, Box::new(expr))
-                            }
-                            Some(Lexeme::Token{ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),tok,..}) if tok=="high_signal" => {
-                                it.next();
-                                expr = Expr::AwaitSignal(TriggerType::HighSignal, Box::new(expr))
-                            }
-                            Some(Lexeme::Token{ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),tok,..}) if tok=="biedge" => {
-                                it.next();
-                                expr = Expr::AwaitSignal(TriggerType::Biedge, Box::new(expr))
-                            }
-                            _ => expr = Expr::Await(Box::new(expr))
+                    } if tok == "await" => match it.peek() {
+                        Some(Lexeme::Token {
+                            ty:
+                                TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+                            tok,
+                            ..
+                        }) if tok == "rising_edge" => {
+                            it.next();
+                            expr = Expr::AwaitSignal(TriggerType::RisingEdge, Box::new(expr))
                         }
+                        Some(Lexeme::Token {
+                            ty:
+                                TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+                            tok,
+                            ..
+                        }) if tok == "falling_edge" => {
+                            it.next();
+                            expr = Expr::AwaitSignal(TriggerType::FallingEdge, Box::new(expr))
+                        }
+                        Some(Lexeme::Token {
+                            ty:
+                                TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+                            tok,
+                            ..
+                        }) if tok == "low_signal" => {
+                            it.next();
+                            expr = Expr::AwaitSignal(TriggerType::LowSignal, Box::new(expr))
+                        }
+                        Some(Lexeme::Token {
+                            ty:
+                                TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+                            tok,
+                            ..
+                        }) if tok == "high_signal" => {
+                            it.next();
+                            expr = Expr::AwaitSignal(TriggerType::HighSignal, Box::new(expr))
+                        }
+                        Some(Lexeme::Token {
+                            ty:
+                                TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
+                            tok,
+                            ..
+                        }) if tok == "biedge" => {
+                            it.next();
+                            expr = Expr::AwaitSignal(TriggerType::Biedge, Box::new(expr))
+                        }
+                        _ => expr = Expr::Await(Box::new(expr)),
                     },
                     Lexeme::Token {
                         ty: TokenType::Number,

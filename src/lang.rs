@@ -1,6 +1,5 @@
-
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum LangItemTarget{
+pub enum LangItemTarget {
     Function,
     Adt,
     Constructor,
