@@ -255,7 +255,7 @@ pub fn lex_group<I: Iterator<Item = char>>(
                             | "struct" | "super" | "trait" | "true" | "type" | "unsafe" | "use"
                             | "where" | "while" | "abstract" | "become" | "box" | "do"
                             | "final" | "macro" | "override" | "priv" | "typeof" | "unsized"
-                            | "virtual" | "yield" | "out" | "inout" => {
+                            | "virtual" | "yield" | "out" | "inout" | "signal" => {
                                 TokenType::Identifier(IdentifierKind::Keyword)
                             }
                             "_" => TokenType::Symbol,

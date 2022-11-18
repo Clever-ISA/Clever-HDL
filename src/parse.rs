@@ -868,6 +868,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                 ),
             }
         }
+
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Normal | IdentifierKind::Keyword),
             tok,

@@ -18,9 +18,10 @@ macro_rules! matches_simple_path{
 
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt::Write,
+    fmt::Write, convert,
 };
 
+pub use crate::ssa::SsaExpr;
 pub use crate::parse::{Meta, Mutability, Safety, SignalDirection, AsyncFnTy};
 use crate::{
     lang::{LangItem, LangItemTarget},
@@ -44,6 +45,13 @@ pub struct Definition {
     pub def: DefinitionInner,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum UserType{
+    Enum(Vec<EnumVariant>),
+    Struct(Constructor),
+    Union(Vec<StructField>)
+}
+
 #[derive(Clone, Debug)]
 pub enum DefinitionInner {
     IncompleteType,
@@ -53,6 +61,7 @@ pub enum DefinitionInner {
     IncompleteConst(Type),
     Signal(Type, SignalDirection),
     Module(Module),
+    Enum(Vec<EnumVariant>)
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -68,6 +77,13 @@ pub struct IntType {
     pub signed: bool,
     pub logic: LogicType,
     pub bits: u16,
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum Repr{
+    Default,
+    Vhdl,
+    Int(IntType),
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -98,7 +114,36 @@ pub enum Type {
     Slice(Box<Type>),
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct TupleField{
+    pub visible_from: DefId,
+    pub attrs: Vec<Meta>,
+    pub ty: Type,
+}
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct StructField{
+    pub visible_from: DefId,
+    pub attrs: Vec<Meta>,
+    pub name: String,
+    pub ty: Type,
+}
+
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum Constructor{
+    Unit,
+    Tuple(Vec<TupleField>),
+    Struct(Vec<StructField>)
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct EnumVariant{
+    pub attrs: Vec<Meta>,
+    pub name: String,
+    pub ctor: Constructor,
+    pub discrim: Option<ConstVal>,
+}
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum LogicVal {
@@ -123,6 +168,13 @@ pub struct FunctionType {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum CtorConst{
+    Unit,
+    Tuple(Vec<ConstVal>),
+    Struct(BTreeMap<String,ConstVal>)
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ConstVal {
     ScalarConst(u128),
     LargeScalar(Vec<u8>),
@@ -133,6 +185,13 @@ pub enum ConstVal {
         base: Box<ConstVal>,
         repeat: Box<ConstVal>,
     },
+    ConstDef(DefId),
+    Constructor{
+        ty: DefId,
+        name: Option<String>,
+        inner: CtorConst,
+    },
+    Complex(Box<SsaExpr>)
 }
 
 #[derive(Clone, Debug)]
@@ -768,6 +827,170 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
     }
 }
 
+
+pub fn convert_top_const_expr(defs: &mut Definitions, cur_mod: DefId, expr: &parse::Expr) -> ConstVal{
+    match expr{
+        parse::Expr::Block(_) => todo!("block"),
+        parse::Expr::LetExpr(_, _) => todo!("let expr"),
+        parse::Expr::Id(path) => {
+            let root = path.root.clone();
+            let mut components = path.components.clone();
+            let last = components.pop().unwrap(); // fixme: currently assumes no generics 
+            let (def,ctor_name) = if root==None&&components.len()==0{
+                match last{
+                    parse::PathComponent::Id(id) => {
+                        if let Some(Definition { def: DefinitionInner::Module(md),.. }) = defs.get_definition(cur_mod){
+                            (md.values[&id],None)
+                        }else{
+                            unreachable!()
+                        }
+                    },
+                    _ => todo!("Handle generics properly")
+                }
+            }else{
+                let ty = defs.find_type_def(cur_mod, &Path{root,components}).unwrap_or_else(||{
+                    panic!("No such type {:?}",path)
+                });
+            };
+        },
+        parse::Expr::FunctionCall { func, args } => todo!(),
+        parse::Expr::Cast(_, _) => todo!(),
+        parse::Expr::StringLiteral(_, _) => todo!(),
+        parse::Expr::CharLiteral(_, _) => todo!(),
+        parse::Expr::Parentheses(_) => todo!(),
+        parse::Expr::MacroExpansion { target, args } => todo!(),
+        parse::Expr::IntLiteral(_) => todo!(),
+        parse::Expr::StructConstructor(_, _) => todo!(),
+        parse::Expr::Field(_, _) => todo!(),
+        parse::Expr::Await(_) => todo!(),
+        parse::Expr::AwaitSignal(_, _) => todo!(),
+        parse::Expr::Return(_) => todo!(),
+        parse::Expr::Break(_, _) => todo!(),
+        parse::Expr::Continue(_) => todo!(),
+        parse::Expr::Yield(_) => todo!(),
+        parse::Expr::Yeet(_) => todo!(),
+        parse::Expr::Try(_) => todo!(),
+        parse::Expr::BinaryOp(_, _, _) => todo!(),
+        parse::Expr::UnaryOp(_, _) => todo!(),
+        parse::Expr::ArrayIndex { base, index } => todo!(),
+        parse::Expr::ArrayCtor(_) => todo!(),
+        parse::Expr::TypeAscription(_, _) => todo!(),
+        parse::Expr::RangeFull => todo!(),
+        parse::Expr::TupleCtor(_) => todo!(),
+    }
+}
+
+pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId){
+    for item in &ast_mod.items{
+        match item{
+            parse::Item::ExternBlock { .. } => todo!("extern block"),
+            parse::Item::Static { .. } |
+            parse::Item::Const { .. } |
+            parse::Item::Signal { .. } |
+            parse::Item::FnDeclaration { .. } => {},
+            parse::Item::Type(_) => todo!(),
+            parse::Item::Mod { name, vis, content: Some(md) } => {
+                let def = defs.find_type_in_mod(sema_mod, name).unwrap();
+                convert_items(defs,md,def);
+            },
+            parse::Item::Adt { attrs, name, generics, vis, variants } => {
+                let def = defs.find_type_in_mod(sema_mod, name).unwrap();
+                let mut repr = Repr::Default;
+                for attr in attrs{
+                    match attr{
+                        Meta::Group(id, inner) if matches_simple_path!(id,repr) => {
+                            for i in inner{
+                                match i{
+                                    Meta::Ident(id) if matches_simple_path!(id,C) => repr = Repr::Vhdl,
+                                    Meta::Ident(id) if matches_simple_path!(id,vhdl) => repr = Repr::Vhdl,
+                                    Meta::Ident(id) if id.root.is_none()&&id.idents.len()==1 => {
+                                        let id = &id.idents[0];
+
+                                        if id.starts_with('i'){
+                                            let bits = id[1..].parse::<u16>().expect("Invalid repr attribute");
+                                            repr = Repr::Int(IntType{signed: true, logic: LogicType::Binary, bits});
+                                        }else if id.starts_with('u'){
+                                            let bits = id[1..].parse::<u16>().expect("Invalid repr attribute");
+                                            repr = Repr::Int(IntType{signed: false, logic: LogicType::Binary, bits});
+                                        }else{
+                                            panic!("Invalid repr attribute {}",id)
+                                        }
+                                    }
+                                    m => panic!("Invalid repr atribute, {:?}",m)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut variants = variants.iter().map(|var|{
+                    let attrs = var.attrs.clone();
+                    let name = var.name.clone();
+                    
+                    let ctor = match &var.ctor{
+                        parse::StructBody::Unit => Constructor::Unit,
+                        parse::StructBody::Tuple(fields) => {
+                            let mut sema_fields = Vec::new();
+                            for field in fields{
+                                let attrs = field.attrs.clone();
+                                let vis = DefId(0); // all enum fields are pub by default
+                                let ty = convert_type(defs, sema_mod, &field.ty);
+                                sema_fields.push(TupleField{visible_from: vis, attrs, ty})
+                            }
+                            Constructor::Tuple(sema_fields)
+                        }
+                        parse::StructBody::Struct(fields) => {
+                            let mut sema_fields = Vec::new();
+                            for field in fields{
+                                let attrs = field.attrs.clone();
+                                let visible_from = DefId(0); // all enum fields are pub by default
+                                let ty = convert_type(defs, sema_mod, &field.ty);
+                                let name = field.name.to_string();
+                                sema_fields.push(StructField{ visible_from, attrs, name, ty });
+                            }
+                            Constructor::Struct(sema_fields)
+                        }
+                    };
+                    let discrim = var.discrim.as_ref().map(|expr| todo!());
+                    EnumVariant{ attrs, name, ctor, discrim }
+                }).collect::<Vec<_>>();
+                defs.get_definition(def).def = DefinitionInner::Enum(variants);
+            },
+            parse::Item::TypeAlias { attrs, vis, name, generics, defn } => todo!(),
+            parse::Item::Trait { attrs, vis, safety, auto, name, generics, supertraits, body } => todo!(),
+            parse::Item::Impl { attrs, safety, generics, tr, ty, body } => todo!(),
+            _ => unreachable!("invalid item")
+        }
+    }
+}
+
+pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId){
+    for item in &ast_mod.items{
+        match item{
+            parse::Item::ExternBlock { attrs, abi, items } => todo!("extern"),
+            parse::Item::FnDeclaration { attrs, visibility, is_const, is_async, safety, abi, name, generics, params, return_ty, block } => todo!(),
+            parse::Item::MacroExpansion { attrs, target, args } => unreachable!("macro expansion"),
+            parse::Item::MacroRules { attrs, visibility, name, content } => unreachable!("macro rules"),
+            parse::Item::Type(_) => todo!(),
+            parse::Item::Mod { name, content: Some(md), .. } => {
+                let def = defs.find_type_in_mod(sema_mod, name).unwrap();
+                convert_items(defs,md,def);
+            },
+            parse::Item::Adt { name, variants, attrs, .. } => {
+                
+            },
+            parse::Item::TypeAlias { attrs, vis, name, generics, defn } => todo!("type alias"),
+            parse::Item::Trait { attrs, vis, safety, auto, name, generics, supertraits, body } => todo!("trait"),
+            parse::Item::Impl { attrs, safety, generics, tr, ty, body } => todo!("impl"),
+            parse::Item::Static { attrs, vis, name, ty, init } => todo!("static"),
+            parse::Item::Const { attrs, vis, name, ty, init } => todo!("const"),
+            parse::Item::Signal { attrs, vis, direction, name, ty } => todo!("signal"),
+            _ => panic!("Unexpected item")
+        }
+    }
+}
+
 pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     let root_defid = defs.next_defid();
     let sema_mod = Module {
@@ -787,4 +1010,5 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     collect_submods(defs, root_mod, root_defid);
     collect_type_names(defs, root_mod, root_defid);
     collect_value_names(defs, root_mod, root_defid);
+    convert_items(defs, root_mod, root_defid);
 }
