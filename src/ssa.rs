@@ -8,7 +8,8 @@ pub enum SsaExpr{
     Local(u32),
     Const(ConstVal),
     BinaryOp(BinaryOp,Box<SsaExpr>,Box<SsaExpr>),
-    UnaryOp(BinaryOp,Box<SsaExpr>),
+    UnaryOp(UnaryOp,Box<SsaExpr>),
+    Cast(Box<SsaExpr>,Box<Type>),
 }
 
 
@@ -60,6 +61,7 @@ pub enum SsaTerminator{
     Jump(SsaJump),
     Branch(SsaBranch),
     FunctionCall(SsaFunctionCall),
+    TailCall(SsaFunctionCall),
     Await(SsaAwait),
     AwaitSignal(SsaAwaitSignal),
     Unreachable,
@@ -77,5 +79,12 @@ pub enum SsaStatement{
     },
     StoreDead(u32),
     Discard(SsaExpr),
-    
+}
+
+#[derive(Clone,Debug,Hash,PartialEq,Eq)]
+pub struct BasicBlock{
+    pub id: u32,
+    pub stats: Vec<SsaStatement>,
+    pub term: SsaTerminator,
+    pub local_tys: Vec<Type>,
 }

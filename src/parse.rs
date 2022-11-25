@@ -58,10 +58,36 @@ pub enum SimplePrefix {
     Root,
 }
 
+impl core::fmt::Display for SimplePrefix{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Self::SelfPath => f.write_str("self::"),
+            Self::Super => f.write_str("super::"),
+            Self::Crate => f.write_str("crate::"),
+            Self::Root => f.write_str("::"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct SimplePath {
     pub root: Option<SimplePrefix>,
     pub idents: Vec<String>,
+}
+
+impl core::fmt::Display for SimplePath{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        if let Some(prefix) = self.root.as_ref(){
+            prefix.fmt(f)?;
+        }
+        let mut sep = "";
+        for s in &self.idents{
+            f.write_str(sep)?;
+            sep = "::";
+            f.write_str(s)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -263,6 +289,33 @@ pub enum Meta {
     IntLit(i128),
     Group(SimplePath, Vec<Self>),
     KeyValue(SimplePath, Box<Self>),
+}
+
+impl core::fmt::Display for Meta{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Self::Ident(id) => id.fmt(f),
+            Self::String(str) => f.write_fmt(format_args!("\"{}\"",str.escape_default())),
+            Self::IntLit(int) => int.fmt(f),
+            Self::Group(id, nested) => {
+                id.fmt(f)?;
+                f.write_str("(");
+                let mut sep = "";
+
+                for inner in nested{
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    inner.fmt(f)?;
+                }
+                f.write_str(")")
+            }
+            Self::KeyValue(key, value) => {
+                key.fmt(f)?;
+                f.write_str(" = ")?;
+                value.fmt(f)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -1869,7 +1922,6 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
     mut attrs: Vec<Meta>,
     peek: &mut PeekMoreIterator<I>,
 ) -> Item {
-    eprintln!("{:?}",peek.peek());
     let is_const = match peek.peek() {
         Some(Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Keyword),

@@ -145,5 +145,5 @@ fn main() {
 
     analyze_crate(&mut defs, &file);
 
-    println!("All definitions: {:#?}", defs);
+    println!("All definitions:\n {}", defs);
 }
