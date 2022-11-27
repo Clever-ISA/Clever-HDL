@@ -58,9 +58,9 @@ pub enum SimplePrefix {
     Root,
 }
 
-impl core::fmt::Display for SimplePrefix{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for SimplePrefix {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             Self::SelfPath => f.write_str("self::"),
             Self::Super => f.write_str("super::"),
             Self::Crate => f.write_str("crate::"),
@@ -75,13 +75,13 @@ pub struct SimplePath {
     pub idents: Vec<String>,
 }
 
-impl core::fmt::Display for SimplePath{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        if let Some(prefix) = self.root.as_ref(){
+impl core::fmt::Display for SimplePath {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if let Some(prefix) = self.root.as_ref() {
             prefix.fmt(f)?;
         }
         let mut sep = "";
-        for s in &self.idents{
+        for s in &self.idents {
             f.write_str(sep)?;
             sep = "::";
             f.write_str(s)?;
@@ -91,11 +91,11 @@ impl core::fmt::Display for SimplePath{
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum AsyncFnTy{
+pub enum AsyncFnTy {
     Normal,
     Async,
     Entity,
-    Procedure
+    Procedure,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -291,18 +291,18 @@ pub enum Meta {
     KeyValue(SimplePath, Box<Self>),
 }
 
-impl core::fmt::Display for Meta{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for Meta {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             Self::Ident(id) => id.fmt(f),
-            Self::String(str) => f.write_fmt(format_args!("\"{}\"",str.escape_default())),
+            Self::String(str) => f.write_fmt(format_args!("\"{}\"", str.escape_default())),
             Self::IntLit(int) => int.fmt(f),
             Self::Group(id, nested) => {
                 id.fmt(f)?;
                 f.write_str("(");
                 let mut sep = "";
 
-                for inner in nested{
+                for inner in nested {
                     f.write_str(sep)?;
                     sep = ", ";
                     inner.fmt(f)?;
@@ -430,6 +430,42 @@ pub enum UnaryOp {
     RangeTo,
     RangeFrom,
     RangeToInclusive,
+}
+
+impl core::fmt::Display for UnaryOp{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            UnaryOp::Try => f.write_str("?"),
+            UnaryOp::Neg => f.write_str("-"),
+            UnaryOp::Deref => f.write_str("*"),
+            UnaryOp::Not => f.write_str("!"),
+            UnaryOp::Ref(mt) => {
+                f.write_str("&")?;
+                if let Mutability::Mut = mt{
+                    f.write_str("mut ")?;
+                }
+                Ok(())
+            },
+            UnaryOp::RawRef(mt) => {
+                f.write_str("&raw ")?;
+                match mt{
+                    Mutability::Mut => f.write_str("mut "),
+                    Mutability::Const => f.write_str("const ")
+                }
+            },
+            UnaryOp::SignalTo(dir) => {
+                f.write_str("&")?;
+                match dir{
+                    SignalDirection::In => f.write_str("in "),
+                    SignalDirection::Inout => f.write_str("inout "),
+                    SignalDirection::Out => f.write_str("out ")
+                }
+            },
+            UnaryOp::RangeTo => f.write_str(".."),
+            UnaryOp::RangeFrom => f.write_str(".."), // TODO: Special Case RangeFrom 
+            UnaryOp::RangeToInclusive => f.write_str("..="),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -1178,11 +1214,10 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                         tok => panic!("Unexpected token {:?}", tok),
                     }
                 }
-                _ =>{ it.reset_cursor(); Some(parse_fn_item(
-                    vis,
-                    attrs,
-                    it,
-                ))},
+                _ => {
+                    it.reset_cursor();
+                    Some(parse_fn_item(vis, attrs, it))
+                }
             }
         }
         Lexeme::Token {
@@ -1335,7 +1370,7 @@ pub fn parse_item<I: Iterator<Item = Lexeme>>(
                     ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
                     tok,
                     ..
-                }) if tok == "entity" || tok=="proc" => {
+                }) if tok == "entity" || tok == "proc" => {
                     it.reset_cursor();
                     Some(parse_fn_item(vis, attrs, it))
                 }
@@ -1967,7 +2002,11 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
                     ty: TokenType::String(StrType::Default),
                     tok,
                     ..
-                } =>{let tok = tok.clone(); peek.next(); Some(tok)},
+                } => {
+                    let tok = tok.clone();
+                    peek.next();
+                    Some(tok)
+                }
                 _ => Some("C".to_string()),
             }
         }
@@ -1979,23 +2018,17 @@ pub fn parse_fn_item<I: Iterator<Item = Lexeme>>(
             ty: TokenType::Identifier(IdentifierKind::Keyword),
             tok,
             ..
-        } if tok == "fn" => {
-            is_async.unwrap_or(AsyncFnTy::Normal)
-        }
+        } if tok == "fn" => is_async.unwrap_or(AsyncFnTy::Normal),
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
             tok,
             ..
-        } if tok == "entity" => {
-            AsyncFnTy::Entity
-        }
+        } if tok == "entity" => AsyncFnTy::Entity,
         Lexeme::Token {
             ty: TokenType::Identifier(IdentifierKind::Keyword | IdentifierKind::Normal),
             tok,
             ..
-        } if tok == "proc" => {
-            AsyncFnTy::Procedure
-        }
+        } if tok == "proc" => AsyncFnTy::Procedure,
         tok => panic!("Unexpected token {:?}", tok),
     };
     let name = match peek.next().expect("Invalid Item") {

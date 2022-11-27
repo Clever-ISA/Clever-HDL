@@ -17,15 +17,21 @@ macro_rules! matches_simple_path{
 }
 
 use std::{
-    collections::{BTreeMap, HashMap}, convert,
+    collections::{BTreeMap, HashMap},
+    convert,
 };
 
+pub use crate::parse::{AsyncFnTy, Meta, Mutability, Safety, SignalDirection};
 pub use crate::ssa::SsaExpr;
-pub use crate::parse::{Meta, Mutability, Safety, SignalDirection, AsyncFnTy};
 use crate::{
     lang::{LangItem, LangItemTarget},
-    parse::{self, Mod, Pattern, Visibility,Path}, ssa::BasicBlock,
+    parse::{self, Mod, Path, Pattern, Visibility},
+    ssa::BasicBlock,
 };
+
+use self::hir::HirConverter;
+
+pub mod hir;
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DefId(u64);
@@ -39,7 +45,7 @@ impl core::fmt::Debug for DefId {
     }
 }
 
-impl core::fmt::Display for DefId{
+impl core::fmt::Display for DefId {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.write_str("#")?;
         self.0.fmt(f)
@@ -54,10 +60,10 @@ pub struct Definition {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub enum UserType{
+pub enum UserType {
     Enum(Vec<EnumVariant>),
     Struct(Constructor),
-    Union(Vec<StructField>)
+    Union(Vec<StructField>),
 }
 
 #[derive(Clone, Debug)]
@@ -71,18 +77,17 @@ pub enum DefinitionInner {
     Signal(Type, SignalDirection),
     Module(Module),
     UserType(UserType),
-    Static{
+    Static {
         ty: Type,
         mutability: Mutability,
         init: ConstVal,
     },
-    Const{
+    Const {
         ty: Type,
         val: ConstVal,
-    }
+    },
+    HirFunction(FunctionType, Vec<hir::HirStatement>)
 }
-
-
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum LogicType {
@@ -92,9 +97,9 @@ pub enum LogicType {
     Ieee1164,
 }
 
-impl core::fmt::Display for LogicType{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for LogicType {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             LogicType::Binary => f.write_str("bool"),
             LogicType::Tristate => f.write_str("logic3"),
             LogicType::Ieee1364 => f.write_str("logic1364"),
@@ -110,19 +115,19 @@ pub struct IntType {
     pub bits: u16,
 }
 
-impl core::fmt::Display for IntType{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        if self.signed{
+impl core::fmt::Display for IntType {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.signed {
             f.write_str("int")?;
-        }else{
+        } else {
             f.write_str("uint")?;
         }
 
-        match self.logic{
-            LogicType::Binary => {},
+        match self.logic {
+            LogicType::Binary => {}
             LogicType::Ieee1164 => f.write_str(" ieee1164")?,
             LogicType::Ieee1364 => f.write_str(" ieee1364")?,
-            LogicType::Tristate => f.write_str(" tristate")?
+            LogicType::Tristate => f.write_str(" tristate")?,
         }
 
         f.write_str("(")?;
@@ -134,7 +139,7 @@ impl core::fmt::Display for IntType{
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum Repr{
+pub enum Repr {
     Default,
     Vhdl,
     Int(IntType),
@@ -157,7 +162,7 @@ pub enum Type {
     Array(Box<Type>, Box<ConstVal>),
     GenericParam(u32),
     FnPtr(FunctionType),
-    FnItem(DefId,FunctionType),
+    FnItem(DefId, FunctionType),
     Signal(SignalDirection, SemaLifetime, Box<Type>),
     Tuple(Vec<Type>),
     Never,
@@ -168,9 +173,9 @@ pub enum Type {
     Slice(Box<Type>),
 }
 
-impl core::fmt::Display for Type{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for Type {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             Type::UserDef(defid) => defid.fmt(f),
             Type::IncompleteAlias(defid) => defid.fmt(f),
             Type::IntegerType(intty) => intty.fmt(f),
@@ -181,50 +186,50 @@ impl core::fmt::Display for Type{
                 f.write_str("; ]")?;
                 val.fmt(f)?;
                 f.write_str("]")
-            },
-            Type::GenericParam(n) => f.write_fmt(format_args!("%{}",n)),
-            Type::FnPtr(fnty) =>fnty.fmt(f),
-            Type::FnItem(defid,fnty) => {
+            }
+            Type::GenericParam(n) => f.write_fmt(format_args!("%{}", n)),
+            Type::FnPtr(fnty) => fnty.fmt(f),
+            Type::FnItem(defid, fnty) => {
                 fnty.fmt(f)?;
                 f.write_str(" [")?;
                 defid.fmt(f)?;
                 f.write_str("]")
-            },
+            }
             Type::Signal(dir, _, inner) => {
                 f.write_str("&")?;
-                match dir{
+                match dir {
                     SignalDirection::In => f.write_str("in ")?,
                     SignalDirection::Inout => f.write_str("inout ")?,
                     SignalDirection::Out => f.write_str("out ")?,
                 }
 
                 inner.fmt(f)
-            },
+            }
             Type::Tuple(tys) => {
                 let mut sep = "";
                 f.write_str("(")?;
 
-                for ty in tys{
+                for ty in tys {
                     f.write_str(sep)?;
                     sep = ", ";
                     ty.fmt(f)?;
                 }
-                if tys.len()==1{
+                if tys.len() == 1 {
                     f.write_str(",")?;
                 }
 
                 f.write_str(")")
-            },
+            }
             Type::Never => f.write_str("!"),
             Type::Pointer(mt, inner) => {
                 f.write_str("*")?;
-                match mt{
+                match mt {
                     Mutability::Const => f.write_str("const ")?,
-                    Mutability::Mut => f.write_str("mut ")?
+                    Mutability::Mut => f.write_str("mut ")?,
                 }
 
                 inner.fmt(f)
-            },
+            }
             Type::Char => f.write_str("char"),
             Type::Inferable => f.write_str("_"),
             Type::Str => f.write_str("str"),
@@ -232,36 +237,35 @@ impl core::fmt::Display for Type{
                 f.write_str("[")?;
                 ty.fmt(f)?;
                 f.write_str("]")
-            },
+            }
         }
     }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct TupleField{
+pub struct TupleField {
     pub visible_from: DefId,
     pub attrs: Vec<Meta>,
     pub ty: Type,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct StructField{
+pub struct StructField {
     pub visible_from: DefId,
     pub attrs: Vec<Meta>,
     pub name: String,
     pub ty: Type,
 }
 
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub enum Constructor{
+pub enum Constructor {
     Unit,
     Tuple(Vec<TupleField>),
-    Struct(Vec<StructField>)
+    Struct(Vec<StructField>),
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct EnumVariant{
+pub struct EnumVariant {
     pub attrs: Vec<Meta>,
     pub name: String,
     pub ctor: Constructor,
@@ -281,9 +285,9 @@ pub enum LogicVal {
     StrongZero,
 }
 
-impl core::fmt::Display for LogicVal{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for LogicVal {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             LogicVal::StrongOne => f.write_str("'1'"),
             LogicVal::WeakOne => f.write_str("'H'"),
             LogicVal::StrongUnknown => f.write_str("'X'"),
@@ -299,24 +303,24 @@ impl core::fmt::Display for LogicVal{
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct FunctionType {
-    async_ty: AsyncFnTy,
-    safety: Safety,
-    constness: Mutability,
-    params: Vec<Type>,
-    retty: Box<Type>,
+    pub async_ty: AsyncFnTy,
+    pub safety: Safety,
+    pub constness: Mutability,
+    pub params: Vec<Type>,
+    pub retty: Box<Type>,
 }
 
-impl core::fmt::Display for FunctionType{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        if self.constness == Mutability::Const{
+impl core::fmt::Display for FunctionType {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.constness == Mutability::Const {
             f.write_str("const ")?;
         }
 
-        if self.safety == Safety::Unsafe{
+        if self.safety == Safety::Unsafe {
             f.write_str("unsafe ")?;
         }
 
-        match self.async_ty{
+        match self.async_ty {
             AsyncFnTy::Async => f.write_str("async fn")?,
             AsyncFnTy::Normal => f.write_str("fn")?,
             AsyncFnTy::Entity => f.write_str("entity")?,
@@ -326,7 +330,7 @@ impl core::fmt::Display for FunctionType{
         f.write_str("(")?;
 
         let mut sep = "";
-        for param in &self.params{
+        for param in &self.params {
             f.write_str(sep)?;
             sep = ", ";
             param.fmt(f)?;
@@ -337,10 +341,10 @@ impl core::fmt::Display for FunctionType{
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub enum CtorConst{
+pub enum CtorConst {
     Unit,
     Tuple(Vec<ConstVal>),
-    Struct(Vec<(String,ConstVal)>)
+    Struct(Vec<(String, ConstVal)>),
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -355,63 +359,64 @@ pub enum ConstVal {
         repeat: Box<ConstVal>,
     },
     ConstDef(DefId),
-    Constructor{
+    Constructor {
         ty: DefId,
         name: Option<String>,
         inner: CtorConst,
     },
     Complex(Vec<BasicBlock>),
     IncompleteExpr,
+    TupleConst(Vec<ConstVal>),
 }
 
-impl core::fmt::Display for ConstVal{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        match self{
+impl core::fmt::Display for ConstVal {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
             ConstVal::ScalarConst(val) => val.fmt(f),
             ConstVal::LargeScalar(val) => {
                 f.write_str("0x")?;
-                for byte in val{
-                    f.write_fmt(format_args!("{:02x}",byte))?;
+                for byte in val {
+                    f.write_fmt(format_args!("{:02x}", byte))?;
                 }
                 Ok(())
-            },
+            }
             ConstVal::LogicVal(val) => val.fmt(f),
-            ConstVal::GenericParam(n) => f.write_fmt(format_args!("%{}",n)),
+            ConstVal::GenericParam(n) => f.write_fmt(format_args!("%{}", n)),
             ConstVal::ArrayLit(vals) => {
                 f.write_str("[")?;
 
                 let mut sep = "";
 
-                for val in vals{
+                for val in vals {
                     f.write_str(sep)?;
                     sep = ", ";
                     val.fmt(f)?;
                 }
 
                 f.write_str("]")
-            },
+            }
             ConstVal::ArrayRepeat { base, repeat } => {
                 f.write_str("[")?;
                 base.fmt(f)?;
                 f.write_str(";")?;
                 repeat.fmt(f)?;
                 f.write_str("]")
-            },
+            }
             ConstVal::ConstDef(defid) => defid.fmt(f),
             ConstVal::Constructor { ty, name, inner } => {
                 ty.fmt(f)?;
 
-                if let Some(name) = name{
+                if let Some(name) = name {
                     f.write_str("::")?;
                     f.write_str(name)?;
                 }
 
-                match inner{
+                match inner {
                     CtorConst::Unit => Ok(()),
                     CtorConst::Tuple(tup) => {
                         f.write_str("(")?;
                         let mut sep = "";
-                        for field in tup{
+                        for field in tup {
                             f.write_str(sep)?;
                             sep = ", ";
                             field.fmt(f)?;
@@ -420,7 +425,7 @@ impl core::fmt::Display for ConstVal{
                     }
                     CtorConst::Struct(st) => {
                         f.write_str("{")?;
-                        for (name,val) in st{
+                        for (name, val) in st {
                             f.write_str(name)?;
                             f.write_str(": ")?;
                             val.fmt(f)?;
@@ -429,11 +434,25 @@ impl core::fmt::Display for ConstVal{
                         f.write_str("}")
                     }
                 }
-            },
+            }
             ConstVal::Complex(_) => todo!("complex expr"),
             ConstVal::IncompleteExpr => f.write_str("/* incomplete */"),
+            ConstVal::TupleConst(tup) => {
+                f.write_str("(")?;
+                let mut sep = "";
+                for field in tup {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    field.fmt(f)?;
+                }
+                f.write_str(")")
+            },
         }
     }
+}
+
+impl ConstVal{
+    pub const UNIT: Self = Self::TupleConst(Vec::new());
 }
 
 #[derive(Clone, Debug)]
@@ -452,29 +471,40 @@ pub struct Definitions {
     lang_items: HashMap<LangItem, DefId>,
 }
 
-impl Definitions{
-    fn display_vis(&self, cur_mod: DefId, vis: DefId,f: &mut core::fmt::Formatter) -> core::fmt::Result{
+impl Definitions {
+    fn display_vis(
+        &self,
+        cur_mod: DefId,
+        vis: DefId,
+        f: &mut core::fmt::Formatter,
+    ) -> core::fmt::Result {
         use core::fmt::Display;
-        if vis==cur_mod{
+        if vis == cur_mod {
             Ok(())
-        }else if vis==ROOT{
+        } else if vis == ROOT {
             f.write_str("pub ")
-        }else{
+        } else {
             f.write_str("pub(in ")?;
             vis.fmt(f)?;
             f.write_str(") ")
         }
     }
-    fn display_item(&self, cur_mod: DefId, defid: DefId, lname: &str, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+    fn display_item(
+        &self,
+        cur_mod: DefId,
+        defid: DefId,
+        lname: &str,
+        f: &mut core::fmt::Formatter,
+    ) -> core::fmt::Result {
         use core::fmt::Display;
         let def = self.defs.get(&defid).unwrap();
-        for attr in &def.attrs{
-            f.write_fmt(format_args!("#[{}]\n",attr))?;
+        for attr in &def.attrs {
+            f.write_fmt(format_args!("#[{}]\n", attr))?;
         }
 
-        self.display_vis(cur_mod,def.visible_from,f)?;
-        
-        match &def.def{
+        self.display_vis(cur_mod, def.visible_from, f)?;
+
+        match &def.def {
             DefinitionInner::Empty => unreachable!(),
             DefinitionInner::IncompleteType => {
                 f.write_str("enum ")?;
@@ -483,7 +513,7 @@ impl Definitions{
                 defid.fmt(f)?;
                 f.write_str(" */")?;
                 f.write_str("{\n /* incomplete */\n}")
-            },
+            }
             DefinitionInner::IncompleteAlias => {
                 f.write_str("type ")?;
                 f.write_str(lname)?;
@@ -491,17 +521,17 @@ impl Definitions{
                 defid.fmt(f)?;
                 f.write_str(" */")?;
                 f.write_str(" = /*incomplete */;")
-            },
+            }
             DefinitionInner::IncompleteFunction(fnty) => {
-                if fnty.constness == Mutability::Const{
+                if fnty.constness == Mutability::Const {
                     f.write_str("const ")?;
                 }
 
-                if fnty.safety == Safety::Unsafe{
+                if fnty.safety == Safety::Unsafe {
                     f.write_str("unsafe ")?;
                 }
 
-                match fnty.async_ty{
+                match fnty.async_ty {
                     AsyncFnTy::Normal => f.write_str("fn ")?,
                     AsyncFnTy::Async => f.write_str("async fn ")?,
                     AsyncFnTy::Entity => f.write_str("entity ")?,
@@ -517,15 +547,15 @@ impl Definitions{
 
                 let mut sep = "";
 
-                for (i,ty) in fnty.params.iter().enumerate(){
+                for (i, ty) in fnty.params.iter().enumerate() {
                     f.write_str(sep)?;
                     sep = ", ";
-                    f.write_fmt(format_args!("_{}: {}",i,ty))?;
+                    f.write_fmt(format_args!("_{}: {}", i, ty))?;
                 }
                 f.write_str(") -> ")?;
                 fnty.retty.fmt(f)?;
                 f.write_str("{\n/*incomplete*/\n}")
-            },
+            }
             DefinitionInner::IncompleteStatic(ty) => {
                 f.write_str("static ")?;
                 f.write_str(lname)?;
@@ -534,7 +564,7 @@ impl Definitions{
                 f.write_str(" */: ")?;
                 ty.fmt(f)?;
                 f.write_str(" = /*incomplete */;")
-            },
+            }
             DefinitionInner::IncompleteConst(ty) => {
                 f.write_str("const ")?;
                 f.write_str(lname)?;
@@ -543,13 +573,13 @@ impl Definitions{
                 f.write_str(" */: ")?;
                 ty.fmt(f)?;
                 f.write_str(" = /*incomplete */;")
-            },
+            }
             DefinitionInner::Signal(ty, dir) => {
                 f.write_str("signal ")?;
-                match dir{
+                match dir {
                     SignalDirection::In => f.write_str("in ")?,
                     SignalDirection::Inout => f.write_str("inout ")?,
-                    SignalDirection::Out => f.write_str("out ")?
+                    SignalDirection::Out => f.write_str("out ")?,
                 }
                 f.write_str(lname)?;
                 f.write_str("/* ")?;
@@ -557,23 +587,23 @@ impl Definitions{
                 f.write_str(" */: ")?;
                 ty.fmt(f)?;
                 f.write_str(" = /*incomplete */;")
-            },
+            }
             DefinitionInner::Module(md) => {
                 f.write_str("mod ")?;
                 f.write_str(lname)?;
                 f.write_str("/* ")?;
                 defid.fmt(f)?;
                 f.write_str(" */{\n")?;
-                for (name,id) in &md.types{
-                    self.display_item(defid,*id, name, f)?;
+                for (name, id) in &md.types {
+                    self.display_item(defid, *id, name, f)?;
                     f.write_str("\n")?;
                 }
-                for (name,id) in &md.values{
-                    self.display_item(defid,*id, name, f)?;
+                for (name, id) in &md.values {
+                    self.display_item(defid, *id, name, f)?;
                     f.write_str("\n")?;
                 }
                 f.write_str("}")
-            },
+            }
             DefinitionInner::UserType(UserType::Struct(ctor)) => {
                 f.write_str("struct ")?;
                 f.write_str(lname)?;
@@ -581,25 +611,25 @@ impl Definitions{
                 defid.fmt(f)?;
                 f.write_str(" */")?;
 
-                match ctor{
+                match ctor {
                     Constructor::Unit => f.write_str(";"),
                     Constructor::Tuple(tup) => {
                         f.write_str("(")?;
                         let mut sep = "";
-                        for field in tup{
+                        for field in tup {
                             f.write_str(sep)?;
-                            self.display_vis(cur_mod, field.visible_from,f)?;
+                            self.display_vis(cur_mod, field.visible_from, f)?;
                             field.ty.fmt(f)?;
                         }
                         f.write_str(");")
                     }
                     Constructor::Struct(st) => {
                         f.write_str("{\n")?;
-                        for field in st{
-                            for attr in &field.attrs{
-                                f.write_fmt(format_args!("#[{}]\n",attr))?;
+                        for field in st {
+                            for attr in &field.attrs {
+                                f.write_fmt(format_args!("#[{}]\n", attr))?;
                             }
-                            self.display_vis(cur_mod, field.visible_from,f)?;
+                            self.display_vis(cur_mod, field.visible_from, f)?;
                             f.write_str(&field.name)?;
                             f.write_str(": ")?;
                             field.ty.fmt(f)?;
@@ -608,7 +638,7 @@ impl Definitions{
                         f.write_str("}\n")
                     }
                 }
-            },
+            }
             DefinitionInner::UserType(UserType::Enum(en)) => {
                 f.write_str("enum ")?;
                 f.write_str(lname)?;
@@ -616,18 +646,18 @@ impl Definitions{
                 defid.fmt(f)?;
                 f.write_str(" */{\n")?;
 
-                for var in en{
-                    for attr in &var.attrs{
-                        f.write_fmt(format_args!("#[{}]\n",attr))?;
+                for var in en {
+                    for attr in &var.attrs {
+                        f.write_fmt(format_args!("#[{}]\n", attr))?;
                     }
 
                     f.write_str(&var.name)?;
-                    match &var.ctor{
-                        Constructor::Unit => {},
+                    match &var.ctor {
+                        Constructor::Unit => {}
                         Constructor::Tuple(tup) => {
                             f.write_str("(")?;
                             let mut sep = "";
-                            for field in tup{
+                            for field in tup {
                                 f.write_str(sep)?;
                                 field.ty.fmt(f)?;
                             }
@@ -635,9 +665,9 @@ impl Definitions{
                         }
                         Constructor::Struct(st) => {
                             f.write_str("{\n")?;
-                            for field in st{
-                                for attr in &field.attrs{
-                                    f.write_fmt(format_args!("#[{}]\n",attr))?;
+                            for field in st {
+                                for attr in &field.attrs {
+                                    f.write_fmt(format_args!("#[{}]\n", attr))?;
                                 }
                                 f.write_str(&field.name)?;
                                 f.write_str(": ")?;
@@ -647,7 +677,7 @@ impl Definitions{
                             f.write_str("}")?;
                         }
                     }
-                    
+
                     f.write_str(",\n")?;
                 }
                 f.write_str("}")
@@ -659,11 +689,11 @@ impl Definitions{
                 defid.fmt(f)?;
                 f.write_str(" */{\n")?;
 
-                for field in fields{
-                    for attr in &field.attrs{
-                        f.write_fmt(format_args!("#[{}]\n",attr))?;
+                for field in fields {
+                    for attr in &field.attrs {
+                        f.write_fmt(format_args!("#[{}]\n", attr))?;
                     }
-                    self.display_vis(cur_mod, field.visible_from,f)?;
+                    self.display_vis(cur_mod, field.visible_from, f)?;
                     f.write_str(&field.name)?;
                     f.write_str(": ")?;
                     field.ty.fmt(f)?;
@@ -671,9 +701,13 @@ impl Definitions{
                 }
                 f.write_str("}")
             }
-            DefinitionInner::Static { ty, mutability, init } => {
+            DefinitionInner::Static {
+                ty,
+                mutability,
+                init,
+            } => {
                 f.write_str("static ")?;
-                if *mutability==Mutability::Mut{
+                if *mutability == Mutability::Mut {
                     f.write_str("mut ")?;
                 }
                 f.write_str(lname)?;
@@ -684,7 +718,7 @@ impl Definitions{
                 f.write_str(" = ")?;
                 init.fmt(f)?;
                 f.write_str(";")
-            },
+            }
             DefinitionInner::Const { ty, val } => {
                 f.write_str("const ")?;
                 f.write_str(lname)?;
@@ -695,15 +729,53 @@ impl Definitions{
                 f.write_str(" = ")?;
                 val.fmt(f)?;
                 f.write_str(";")
+            }
+            DefinitionInner::HirFunction(fnty, stats) => {
+                if fnty.constness == Mutability::Const {
+                    f.write_str("const ")?;
+                }
+
+                if fnty.safety == Safety::Unsafe {
+                    f.write_str("unsafe ")?;
+                }
+
+                match fnty.async_ty {
+                    AsyncFnTy::Normal => f.write_str("fn ")?,
+                    AsyncFnTy::Async => f.write_str("async fn ")?,
+                    AsyncFnTy::Entity => f.write_str("entity ")?,
+                    AsyncFnTy::Procedure => f.write_str("proc ")?,
+                }
+
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str(" */")?;
+
+                f.write_str("(")?;
+
+                let mut sep = "";
+
+                for (i, ty) in fnty.params.iter().enumerate() {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    f.write_fmt(format_args!("_{}: {}", i, ty))?;
+                }
+                f.write_str(") -> ")?;
+                fnty.retty.fmt(f)?;
+                f.write_str("{\n")?;
+                for stat in stats{
+                    stat.fmt(f)?;
+                    f.write_str("\n")?;
+                }
+                f.write_str("}")
             },
         }
-
     }
 }
 
-impl core::fmt::Display for Definitions{
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
-        for (name, defid) in self.crates.iter(){
+impl core::fmt::Display for Definitions {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        for (name, defid) in self.crates.iter() {
             f.write_str("extern crate ")?;
             f.write_str(name)?;
             f.write_str(" /* ")?;
@@ -715,23 +787,23 @@ impl core::fmt::Display for Definitions{
 
         let rootmd = self.defs.get(&self.curcrate).unwrap();
 
-        match &rootmd.def{
+        match &rootmd.def {
             DefinitionInner::Module(md) => {
-                for attr in &rootmd.attrs{
-                    f.write_fmt(format_args!("#![{}]\n",attr))?;
+                for attr in &rootmd.attrs {
+                    f.write_fmt(format_args!("#![{}]\n", attr))?;
                 }
                 f.write_str("\n")?;
-                for (name,defid) in &md.types{
-                    self.display_item(self.curcrate,*defid, name, f)?;
+                for (name, defid) in &md.types {
+                    self.display_item(self.curcrate, *defid, name, f)?;
                     f.write_str("\n")?;
                 }
-                for (name,defid) in &md.values{
-                    self.display_item(self.curcrate,*defid, name, f)?;
+                for (name, defid) in &md.values {
+                    self.display_item(self.curcrate, *defid, name, f)?;
                     f.write_str("\n")?;
                 }
                 Ok(())
-            },
-            _ => unreachable!()
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -792,13 +864,13 @@ impl Definitions {
         defid
     }
 
-    pub fn check_visible(&self, cur_mod: DefId, def: DefId) -> bool{
-        if def==DefId(0){
+    pub fn check_visible(&self, cur_mod: DefId, def: DefId) -> bool {
+        if def == DefId(0) {
             true
-        }else if let Some(Definition { visible_from, .. }) = self.defs.get(&def){
+        } else if let Some(Definition { visible_from, .. }) = self.defs.get(&def) {
             self.visible_from(cur_mod, *visible_from)
-        }else{
-            panic!("Expected a definition for {:?}",def)
+        } else {
+            panic!("Expected a definition for {:?}", def)
         }
     }
 
@@ -814,11 +886,15 @@ impl Definitions {
         }
     }
 
-    pub fn find_val_in_mod(&mut self, cur_mod: DefId, name: &str) -> Option<DefId>{
-        if let Some(Definition { def: DefinitionInner::Module(md),.. }) = self.defs.get(&cur_mod){
+    pub fn find_val_in_mod(&mut self, cur_mod: DefId, name: &str) -> Option<DefId> {
+        if let Some(Definition {
+            def: DefinitionInner::Module(md),
+            ..
+        }) = self.defs.get(&cur_mod)
+        {
             md.values.get(name).copied()
         } else {
-            panic!("Expected a module for current module {:?}",cur_mod)
+            panic!("Expected a module for current module {:?}", cur_mod)
         }
     }
 
@@ -1261,24 +1337,42 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                 is_const,
                 is_async,
                 safety,
-                name,  
+                name,
                 params,
                 return_ty,
                 ..
             } => {
                 let vis = convert_visibility(defs, sema_mod, visibility).unwrap_or(sema_mod);
-                let sig = FunctionType{
+                let sig = FunctionType {
                     async_ty: *is_async,
-                    constness: if *is_const{Mutability::Const}else{Mutability::Mut},
+                    constness: if *is_const {
+                        Mutability::Const
+                    } else {
+                        Mutability::Mut
+                    },
                     safety: *safety,
-                    params: params.iter().map(|ty|{
-                        convert_type(defs, sema_mod, ty.ty.as_ref().unwrap())
-                    }).collect(),
-                    retty: Box::new(return_ty.as_ref().map(|ty|convert_type(defs, sema_mod, ty)).unwrap_or(Type::Tuple(Vec::new())))
+                    params: params
+                        .iter()
+                        .map(|ty| convert_type(defs, sema_mod, ty.ty.as_ref().unwrap()))
+                        .collect(),
+                    retty: Box::new(
+                        return_ty
+                            .as_ref()
+                            .map(|ty| convert_type(defs, sema_mod, ty))
+                            .unwrap_or(Type::Tuple(Vec::new())),
+                    ),
                 };
                 let def = DefinitionInner::IncompleteFunction(sig);
 
-                defs.insert_value(sema_mod, name, Definition { visible_from: vis, attrs: attrs.clone(), def });
+                defs.insert_value(
+                    sema_mod,
+                    name,
+                    Definition {
+                        visible_from: vis,
+                        attrs: attrs.clone(),
+                        def,
+                    },
+                );
             }
             parse::Item::MacroRules { .. }
             | parse::Item::Type(_)
@@ -1371,113 +1465,117 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
     }
 }
 
-
-pub fn convert_top_const_expr(defs: &mut Definitions, cur_mod: DefId, expr: &parse::Expr) -> ConstVal{
-    match expr{
+pub fn convert_top_const_expr(
+    defs: &mut Definitions,
+    cur_mod: DefId,
+    expr: &parse::Expr,
+) -> ConstVal {
+    match expr {
         parse::Expr::Block(_) => todo!("block"),
         parse::Expr::LetExpr(_, _) => todo!("let expr"),
         parse::Expr::Id(path) => {
             let root = path.root.clone();
             let mut components = path.components.clone();
-            let last = components.pop().unwrap(); // fixme: currently assumes no generics 
-            if root==None&&components.len()==0{
-                match last{
+            let last = components.pop().unwrap(); // fixme: currently assumes no generics
+            if root == None && components.len() == 0 {
+                match last {
                     parse::PathComponent::Id(id) => {
-                        if let Definition { def: DefinitionInner::Module(md),.. } = defs.get_definition(cur_mod){
+                        if let Definition {
+                            def: DefinitionInner::Module(md),
+                            ..
+                        } = defs.get_definition(cur_mod)
+                        {
                             ConstVal::ConstDef(md.values[&id])
-                        }else{
+                        } else {
                             unreachable!()
                         }
-                    },
-                    _ => todo!("Handle generics properly")
+                    }
+                    _ => todo!("Handle generics properly"),
                 }
-            }else{
-                let ty = defs.find_type_def(cur_mod, &Path{root,components}).unwrap_or_else(||{
-                    panic!("No such type {:?}",path)
-                });
-                
-                if defs.lang_items.get(&LangItem::Logic1164)==Some(&ty){
-                    match last{
-                        parse::PathComponent::Id(id) => {
-                            match &*id{
-                                "StrongOne" => ConstVal::LogicVal(LogicVal::StrongOne),
-                                "WeakOne" => ConstVal::LogicVal(LogicVal::WeakOne),
-                                "StrongUnknown" => ConstVal::LogicVal(LogicVal::StrongUnknown),
-                                "DontCare" => ConstVal::LogicVal(LogicVal::DontCare),
-                                "Uninitialized" => ConstVal::LogicVal(LogicVal::Uninitialized),
-                                "WeakUnknown" => ConstVal::LogicVal(LogicVal::WeakUnknown),
-                                "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
-                                "WeakZero" => ConstVal::LogicVal(LogicVal::WeakZero),
-                                "StrongZero" => ConstVal::LogicVal(LogicVal::StrongZero),
-                                _ => panic!("No such enumerator {:?}",path)
-                            }
-                        }
-                        _ => panic!("Unexpected generics on struct {:?}",path)
+            } else {
+                let ty = defs
+                    .find_type_def(cur_mod, &Path { root, components })
+                    .unwrap_or_else(|| panic!("No such type {:?}", path));
+
+                if defs.lang_items.get(&LangItem::Logic1164) == Some(&ty) {
+                    match last {
+                        parse::PathComponent::Id(id) => match &*id {
+                            "StrongOne" => ConstVal::LogicVal(LogicVal::StrongOne),
+                            "WeakOne" => ConstVal::LogicVal(LogicVal::WeakOne),
+                            "StrongUnknown" => ConstVal::LogicVal(LogicVal::StrongUnknown),
+                            "DontCare" => ConstVal::LogicVal(LogicVal::DontCare),
+                            "Uninitialized" => ConstVal::LogicVal(LogicVal::Uninitialized),
+                            "WeakUnknown" => ConstVal::LogicVal(LogicVal::WeakUnknown),
+                            "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
+                            "WeakZero" => ConstVal::LogicVal(LogicVal::WeakZero),
+                            "StrongZero" => ConstVal::LogicVal(LogicVal::StrongZero),
+                            _ => panic!("No such enumerator {:?}", path),
+                        },
+                        _ => panic!("Unexpected generics on struct {:?}", path),
                     }
-                }else if defs.lang_items.get(&LangItem::Logic1364)==Some(&ty){
-                    match last{
-                        parse::PathComponent::Id(id) => {
-                            match &*id{
-                                "One" => ConstVal::LogicVal(LogicVal::StrongOne),
-                                "DontCare" => ConstVal::LogicVal(LogicVal::DontCare),
-                                "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
-                                "Zero" => ConstVal::LogicVal(LogicVal::StrongZero),
-                                _ => panic!("No such enumerator {:?}",path)
-                            }
-                        }
-                        _ => panic!("Unexpected generics on struct {:?}",path)
+                } else if defs.lang_items.get(&LangItem::Logic1364) == Some(&ty) {
+                    match last {
+                        parse::PathComponent::Id(id) => match &*id {
+                            "One" => ConstVal::LogicVal(LogicVal::StrongOne),
+                            "DontCare" => ConstVal::LogicVal(LogicVal::DontCare),
+                            "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
+                            "Zero" => ConstVal::LogicVal(LogicVal::StrongZero),
+                            _ => panic!("No such enumerator {:?}", path),
+                        },
+                        _ => panic!("Unexpected generics on struct {:?}", path),
                     }
-                }else if defs.lang_items.get(&LangItem::LogicTri)==Some(&ty){
-                    match last{
-                        parse::PathComponent::Id(id) => {
-                            match &*id{
-                                "One" => ConstVal::LogicVal(LogicVal::StrongOne),
-                                "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
-                                "Zero" => ConstVal::LogicVal(LogicVal::StrongZero),
-                                _ => panic!("No such enumerator {:?}",path)
-                            }
-                        }
-                        _ => panic!("Unexpected generics on struct {:?}",path)
+                } else if defs.lang_items.get(&LangItem::LogicTri) == Some(&ty) {
+                    match last {
+                        parse::PathComponent::Id(id) => match &*id {
+                            "One" => ConstVal::LogicVal(LogicVal::StrongOne),
+                            "HighImpedence" => ConstVal::LogicVal(LogicVal::HighImpedence),
+                            "Zero" => ConstVal::LogicVal(LogicVal::StrongZero),
+                            _ => panic!("No such enumerator {:?}", path),
+                        },
+                        _ => panic!("Unexpected generics on struct {:?}", path),
                     }
-                }else{
-                    match last{
-                        parse::PathComponent::Id(id) => {
-                            match &defs.get_definition(ty).def{
-                                DefinitionInner::IncompleteType => panic!("Unresolved Type"),
-                                DefinitionInner::IncompleteAlias => panic!("Unresolved Alias"),
-                                DefinitionInner::IncompleteFunction(_) |
-                                DefinitionInner::IncompleteStatic(_) |
-                                DefinitionInner::IncompleteConst(_) |
-                                DefinitionInner::Static { .. } | 
-                                DefinitionInner::Const { .. } | 
-                                DefinitionInner::Signal(_, _) => panic!("Not a type"),
-                                DefinitionInner::Module(_) => {
-                                    if let Some(val) = defs.find_val_in_mod(ty,&id).filter(|&def|defs.check_visible(cur_mod, def)){
-                                        ConstVal::ConstDef(val)
-                                    }else if let Some(val) = defs.find_type_in_mod(ty, &id).filter(|&def|defs.check_visible(cur_mod, def)){
-                                        todo!("Constructor")
-                                    }else{
-                                        panic!("Could not find {:?}",path)
-                                    }
-                                },
-                                DefinitionInner::UserType(_) => todo!("Constructor"),
-                                DefinitionInner::Empty => unreachable!(),
+                } else {
+                    match last {
+                        parse::PathComponent::Id(id) => match &defs.get_definition(ty).def {
+                            DefinitionInner::IncompleteType => panic!("Unresolved Type"),
+                            DefinitionInner::IncompleteAlias => panic!("Unresolved Alias"),
+                            DefinitionInner::IncompleteFunction(_)
+                            | DefinitionInner::IncompleteStatic(_)
+                            | DefinitionInner::IncompleteConst(_)
+                            | DefinitionInner::Static { .. }
+                            | DefinitionInner::Const { .. }
+                            | DefinitionInner::Signal(_, _)
+                            | DefinitionInner::HirFunction(_, _) => panic!("Not a type"),
+                            DefinitionInner::Module(_) => {
+                                if let Some(val) = defs
+                                    .find_val_in_mod(ty, &id)
+                                    .filter(|&def| defs.check_visible(cur_mod, def))
+                                {
+                                    ConstVal::ConstDef(val)
+                                } else if let Some(val) = defs
+                                    .find_type_in_mod(ty, &id)
+                                    .filter(|&def| defs.check_visible(cur_mod, def))
+                                {
+                                    todo!("Constructor")
+                                } else {
+                                    panic!("Could not find {:?}", path)
+                                }
                             }
-                        }
-                        _ => todo!("Unexpected generics on module {:?}",path)
+                            DefinitionInner::UserType(_) => todo!("Constructor"),
+                            DefinitionInner::Empty => unreachable!(),
+                        },
+                        _ => todo!("Unexpected generics on module {:?}", path),
                     }
                 }
             }
-        },
+        }
         parse::Expr::FunctionCall { .. } => todo!(),
         parse::Expr::Cast(_, _) => todo!(),
         parse::Expr::StringLiteral(_, _) => todo!(),
         parse::Expr::CharLiteral(_, _) => todo!(),
         parse::Expr::Parentheses(expr) => convert_top_const_expr(defs, cur_mod, expr),
         parse::Expr::MacroExpansion { target, args } => todo!(),
-        parse::Expr::IntLiteral(n) => {
-            ConstVal::ScalarConst(*n)
-        },
+        parse::Expr::IntLiteral(n) => ConstVal::ScalarConst(*n),
         parse::Expr::StructConstructor(_, _) => todo!(),
         parse::Expr::Field(_, _) => todo!(),
         parse::Expr::Await(_) => todo!(),
@@ -1498,43 +1596,71 @@ pub fn convert_top_const_expr(defs: &mut Definitions, cur_mod: DefId, expr: &par
     }
 }
 
-pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId){
-    for item in &ast_mod.items{
-        match item{
+pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
+    for item in &ast_mod.items {
+        match item {
             parse::Item::ExternBlock { .. } => todo!("extern block"),
-            parse::Item::Static { .. } |
-            parse::Item::Const { .. } |
-            parse::Item::Signal { .. } |
-            parse::Item::FnDeclaration { .. } => {},
+            parse::Item::Static { .. }
+            | parse::Item::Const { .. }
+            | parse::Item::Signal { .. }
+            | parse::Item::FnDeclaration { .. } => {}
             parse::Item::Type(_) => todo!(),
-            parse::Item::Mod { name, vis, content: Some(md) } => {
+            parse::Item::Mod {
+                name,
+                vis,
+                content: Some(md),
+            } => {
                 let def = defs.find_type_in_mod(sema_mod, name).unwrap();
-                convert_types(defs,md,def);
-            },
-            parse::Item::Adt { attrs, name, generics, vis, variants } => {
+                convert_types(defs, md, def);
+            }
+            parse::Item::Adt {
+                attrs,
+                name,
+                generics,
+                vis,
+                variants,
+            } => {
                 let def = defs.find_type_in_mod(sema_mod, name).unwrap();
                 let mut repr = Repr::Default;
-                for attr in attrs{
-                    match attr{
-                        Meta::Group(id, inner) if matches_simple_path!(id,repr) => {
-                            for i in inner{
-                                match i{
-                                    Meta::Ident(id) if matches_simple_path!(id,C) => repr = Repr::Vhdl,
-                                    Meta::Ident(id) if matches_simple_path!(id,vhdl) => repr = Repr::Vhdl,
-                                    Meta::Ident(id) if id.root.is_none()&&id.idents.len()==1 => {
+                for attr in attrs {
+                    match attr {
+                        Meta::Group(id, inner) if matches_simple_path!(id, repr) => {
+                            for i in inner {
+                                match i {
+                                    Meta::Ident(id) if matches_simple_path!(id, C) => {
+                                        repr = Repr::Vhdl
+                                    }
+                                    Meta::Ident(id) if matches_simple_path!(id, vhdl) => {
+                                        repr = Repr::Vhdl
+                                    }
+                                    Meta::Ident(id)
+                                        if id.root.is_none() && id.idents.len() == 1 =>
+                                    {
                                         let id = &id.idents[0];
 
-                                        if id.starts_with('i'){
-                                            let bits = id[1..].parse::<u16>().expect("Invalid repr attribute");
-                                            repr = Repr::Int(IntType{signed: true, logic: LogicType::Binary, bits});
-                                        }else if id.starts_with('u'){
-                                            let bits = id[1..].parse::<u16>().expect("Invalid repr attribute");
-                                            repr = Repr::Int(IntType{signed: false, logic: LogicType::Binary, bits});
-                                        }else{
-                                            panic!("Invalid repr attribute {}",id)
+                                        if id.starts_with('i') {
+                                            let bits = id[1..]
+                                                .parse::<u16>()
+                                                .expect("Invalid repr attribute");
+                                            repr = Repr::Int(IntType {
+                                                signed: true,
+                                                logic: LogicType::Binary,
+                                                bits,
+                                            });
+                                        } else if id.starts_with('u') {
+                                            let bits = id[1..]
+                                                .parse::<u16>()
+                                                .expect("Invalid repr attribute");
+                                            repr = Repr::Int(IntType {
+                                                signed: false,
+                                                logic: LogicType::Binary,
+                                                bits,
+                                            });
+                                        } else {
+                                            panic!("Invalid repr attribute {}", id)
                                         }
                                     }
-                                    m => panic!("Invalid repr atribute, {:?}",m)
+                                    m => panic!("Invalid repr atribute, {:?}", m),
                                 }
                             }
                         }
@@ -1542,129 +1668,240 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId){
                     }
                 }
 
-                let mut variants = variants.iter().map(|var|{
-                    let attrs = var.attrs.clone();
-                    let name = var.name.clone();
-                    
-                    let ctor = match &var.ctor{
-                        parse::StructBody::Unit => Constructor::Unit,
-                        parse::StructBody::Tuple(fields) => {
-                            let mut sema_fields = Vec::new();
-                            for field in fields{
-                                let attrs = field.attrs.clone();
-                                let vis = DefId(0); // all enum fields are pub by default
-                                let ty = convert_type(defs, sema_mod, &field.ty);
-                                sema_fields.push(TupleField{visible_from: vis, attrs, ty})
+                let mut variants = variants
+                    .iter()
+                    .map(|var| {
+                        let attrs = var.attrs.clone();
+                        let name = var.name.clone();
+
+                        let ctor = match &var.ctor {
+                            parse::StructBody::Unit => Constructor::Unit,
+                            parse::StructBody::Tuple(fields) => {
+                                let mut sema_fields = Vec::new();
+                                for field in fields {
+                                    let attrs = field.attrs.clone();
+                                    let vis = DefId(0); // all enum fields are pub by default
+                                    let ty = convert_type(defs, sema_mod, &field.ty);
+                                    sema_fields.push(TupleField {
+                                        visible_from: vis,
+                                        attrs,
+                                        ty,
+                                    })
+                                }
+                                Constructor::Tuple(sema_fields)
                             }
-                            Constructor::Tuple(sema_fields)
-                        }
-                        parse::StructBody::Struct(fields) => {
-                            let mut sema_fields = Vec::new();
-                            for field in fields{
-                                let attrs = field.attrs.clone();
-                                let visible_from = DefId(0); // all enum fields are pub by default
-                                let ty = convert_type(defs, sema_mod, &field.ty);
-                                let name = field.name.to_string();
-                                sema_fields.push(StructField{ visible_from, attrs, name, ty });
+                            parse::StructBody::Struct(fields) => {
+                                let mut sema_fields = Vec::new();
+                                for field in fields {
+                                    let attrs = field.attrs.clone();
+                                    let visible_from = DefId(0); // all enum fields are pub by default
+                                    let ty = convert_type(defs, sema_mod, &field.ty);
+                                    let name = field.name.to_string();
+                                    sema_fields.push(StructField {
+                                        visible_from,
+                                        attrs,
+                                        name,
+                                        ty,
+                                    });
+                                }
+                                Constructor::Struct(sema_fields)
                             }
-                            Constructor::Struct(sema_fields)
+                        };
+                        let discrim = var.discrim.as_ref().map(|_| ConstVal::IncompleteExpr);
+                        EnumVariant {
+                            attrs,
+                            name,
+                            ctor,
+                            discrim,
                         }
-                    };
-                    let discrim = var.discrim.as_ref().map(|_| ConstVal::IncompleteExpr);
-                    EnumVariant{ attrs, name, ctor, discrim }
-                }).collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
                 defs.get_definition(def).def = DefinitionInner::UserType(UserType::Enum(variants));
-            },
-            parse::Item::TypeAlias { attrs, vis, name, generics, defn } => todo!("Type alias"),
-            parse::Item::Trait { attrs, vis, safety, auto, name, generics, supertraits, body } => todo!(),
-            parse::Item::Impl { attrs, safety, generics, tr, ty, body } => todo!("impl block"),
-            _ => unreachable!("invalid item")
+            }
+            parse::Item::TypeAlias {
+                attrs,
+                vis,
+                name,
+                generics,
+                defn,
+            } => todo!("Type alias"),
+            parse::Item::Trait {
+                attrs,
+                vis,
+                safety,
+                auto,
+                name,
+                generics,
+                supertraits,
+                body,
+            } => todo!(),
+            parse::Item::Impl {
+                attrs,
+                safety,
+                generics,
+                tr,
+                ty,
+                body,
+            } => todo!("impl block"),
+            _ => unreachable!("invalid item"),
         }
     }
 }
 
-pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId){
-    for item in &ast_mod.items{
-        match item{
+pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
+    for item in &ast_mod.items {
+        match item {
             parse::Item::ExternBlock { attrs, abi, items } => todo!("extern"),
-            parse::Item::FnDeclaration { name, block, params, .. } => {
-                // let def = defs.find_val_in_mod(sema_mod, name).unwrap();
+            parse::Item::FnDeclaration {
+                name,
+                block,
+                params,
+                ..
+            } => {
+                let def = defs.find_val_in_mod(sema_mod, name).unwrap();
 
-                // let fndef = core::mem::replace(&mut defs.get_definition(def).def, DefinitionInner::Empty);
-                
-                // let fnty = match fndef{
-                //     DefinitionInner::IncompleteFunction(fnty) => fnty,
-                //     item => unreachable!("Expected a function, got {:?}",item)
-                // };
+                let fndef =
+                    core::mem::replace(&mut defs.get_definition(def).def, DefinitionInner::Empty);
 
+                let fnty = match fndef {
+                    DefinitionInner::IncompleteFunction(fnty) => fnty,
+                    item => unreachable!("Expected a function, got {:?}", item),
+                };
 
-
-            },
-            parse::Item::MacroExpansion { attrs, target, args } => unreachable!("macro expansion"),
-            parse::Item::MacroRules { attrs, visibility, name, content } => unreachable!("macro rules"),
+                if let Some(block) = block{
+                    let mut converter = HirConverter::new(defs,&fnty,sema_mod);
+                    for ty in fnty.params.iter().cloned(){
+                        converter.allocate_local(ty);
+                    }
+                    for item in block{
+                        converter.convert_statement(item);
+                    }
+                    let stats = converter.into_function();
+                    defs.get_definition(def).def = DefinitionInner::HirFunction(fnty, stats);
+                }else{
+                    todo!("extern fn")
+                }                
+            }
+            parse::Item::MacroExpansion {
+                attrs,
+                target,
+                args,
+            } => unreachable!("macro expansion"),
+            parse::Item::MacroRules {
+                attrs,
+                visibility,
+                name,
+                content,
+            } => unreachable!("macro rules"),
             parse::Item::Type(_) => todo!(),
-            parse::Item::Mod { name, content: Some(md), .. } => {
+            parse::Item::Mod {
+                name,
+                content: Some(md),
+                ..
+            } => {
                 let def = defs.find_type_in_mod(sema_mod, name).unwrap();
-                convert_items(defs,md,def);
-            },
+                convert_items(defs, md, def);
+            }
             parse::Item::Adt { name, variants, .. } => {
                 let def = defs.find_type_in_mod(sema_mod, name).unwrap();
 
-                let mut sema_variants = if let Definition{def: DefinitionInner::UserType(UserType::Enum(e)),..} = defs.get_definition(def){
+                let mut sema_variants = if let Definition {
+                    def: DefinitionInner::UserType(UserType::Enum(e)),
+                    ..
+                } = defs.get_definition(def)
+                {
                     core::mem::take(e)
-                }else{
+                } else {
                     unreachable!("Expected an adt")
                 };
 
-                for (sema_variant,ast_variant) in sema_variants.iter_mut().zip(variants){
-                    sema_variant.discrim = ast_variant.discrim.as_ref().map(|expr| convert_top_const_expr(defs, sema_mod, expr));
+                for (sema_variant, ast_variant) in sema_variants.iter_mut().zip(variants) {
+                    sema_variant.discrim = ast_variant
+                        .discrim
+                        .as_ref()
+                        .map(|expr| convert_top_const_expr(defs, sema_mod, expr));
                 }
 
-                if let Definition{def: DefinitionInner::UserType(UserType::Enum(e)),..} = defs.get_definition(def){
+                if let Definition {
+                    def: DefinitionInner::UserType(UserType::Enum(e)),
+                    ..
+                } = defs.get_definition(def)
+                {
                     *e = sema_variants;
-                }else{
+                } else {
                     unreachable!("Expected an adt")
                 }
-            },
-            parse::Item::TypeAlias { attrs, vis, name, generics, defn } => todo!("type alias"),
-            parse::Item::Trait { attrs, vis, safety, auto, name, generics, supertraits, body } => todo!("trait"),
-            parse::Item::Impl { attrs, safety, generics, tr, ty, body } => todo!("impl"),
-            parse::Item::Static { name, ty,init, .. } => {
-                let (mt,name) = match name{
-                    Pattern::Ident(mt, name) => {
-                        (*mt,name)
-                    }
-                    pat => panic!("Invalid name for static {:?}",pat)
+            }
+            parse::Item::TypeAlias {
+                attrs,
+                vis,
+                name,
+                generics,
+                defn,
+            } => todo!("type alias"),
+            parse::Item::Trait {
+                attrs,
+                vis,
+                safety,
+                auto,
+                name,
+                generics,
+                supertraits,
+                body,
+            } => todo!("trait"),
+            parse::Item::Impl {
+                attrs,
+                safety,
+                generics,
+                tr,
+                ty,
+                body,
+            } => todo!("impl"),
+            parse::Item::Static { name, ty, init, .. } => {
+                let (mt, name) = match name {
+                    Pattern::Ident(mt, name) => (*mt, name),
+                    pat => panic!("Invalid name for static {:?}", pat),
                 };
                 let def = defs.find_val_in_mod(sema_mod, name).unwrap();
 
                 let ty = convert_type(defs, sema_mod, ty);
-                
+
                 let init = convert_top_const_expr(defs, sema_mod, init);
 
-                defs.get_definition(def).def = DefinitionInner::Static { ty, mutability: mt, init };
-
-            },
-            parse::Item::Const {name: Pattern::Discard, ty, init,.. } => todo!("anon const"),
-            parse::Item::Const{name, ty, init, ..} => {
-                let name = match name{
-                    Pattern::Ident(Mutability::Const, name) => {
-                        name
-                    }
-                    pat => panic!("Invalid name for const {:?}",pat)
+                defs.get_definition(def).def = DefinitionInner::Static {
+                    ty,
+                    mutability: mt,
+                    init,
                 };
-
+            }
+            parse::Item::Const {
+                name: Pattern::Discard,
+                ty,
+                init,
+                ..
+            } => todo!("anon const"),
+            parse::Item::Const { name, ty, init, .. } => {
+                let name = match name {
+                    Pattern::Ident(Mutability::Const, name) => name,
+                    pat => panic!("Invalid name for const {:?}", pat),
+                };
 
                 let def = defs.find_val_in_mod(sema_mod, name).unwrap();
 
                 let ty = convert_type(defs, sema_mod, ty);
-                
+
                 let val = convert_top_const_expr(defs, sema_mod, init.as_ref().unwrap());
 
                 defs.get_definition(def).def = DefinitionInner::Const { ty, val };
             }
-            parse::Item::Signal { attrs, vis, direction, name, ty } => {},
-            _ => panic!("Unexpected item")
+            parse::Item::Signal {
+                attrs,
+                vis,
+                direction,
+                name,
+                ty,
+            } => {}
+            _ => panic!("Unexpected item"),
         }
     }
 }
@@ -1688,6 +1925,6 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     collect_submods(defs, root_mod, root_defid);
     collect_type_names(defs, root_mod, root_defid);
     collect_value_names(defs, root_mod, root_defid);
-    convert_types(defs,root_mod,root_defid);
-    convert_items(defs,root_mod, root_defid);
+    convert_types(defs, root_mod, root_defid);
+    convert_items(defs, root_mod, root_defid);
 }
