@@ -2073,7 +2073,7 @@ pub fn tycheck_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
                 })
             }
             parse::Item::Mod { name, content: Some(md), .. } => {
-                let defid = defs.find_type_in_mod(sema_mod, name)?;
+                let defid = defs.find_type_in_mod(sema_mod, name).unwrap();
                 tycheck_crate(defs, defid, md);   
             }
             _ => {}
@@ -2107,7 +2107,7 @@ pub fn lower_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
                 defs.get_definition(defid).def = DefinitionInner::MirFunction(fnty, blocks);
             }
             parse::Item::Mod { name, content: Some(md), .. } => {
-                let defid = defs.find_type_in_mod(sema_mod, name)?;
+                let defid = defs.find_type_in_mod(sema_mod, name).unwrap();
                 tycheck_crate(defs, defid, md);   
             }
             _ => {}

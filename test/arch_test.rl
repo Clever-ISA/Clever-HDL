@@ -35,6 +35,5 @@ pub const BAR: i13 = 2048;
 pub signal in G_CLOCK: bool;
 
 pub proc main(){
-    let val = Foo{x: FOO};
     loop{G_CLOCK.await falling_edge}
 }
