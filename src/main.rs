@@ -3,7 +3,10 @@ pub mod lang;
 pub mod lex;
 pub mod parse;
 pub mod sema;
-pub mod ssa;
+pub mod utils;
+pub mod opt;
+pub mod rlib;
+pub mod mangle;
 
 use std::{io::Read, path::PathBuf};
 

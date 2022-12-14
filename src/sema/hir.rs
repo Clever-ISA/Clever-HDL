@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::{collections::{BTreeMap, HashMap, VecDeque}, hash::BuildHasherDefault};
 
 use parse::TriggerType;
 
@@ -7,7 +7,9 @@ pub use crate::parse::{BinaryOp,UnaryOp,Mutability};
 use crate::parse::{self, PathComponent};
 
 pub use crate::sema::{ConstVal,Type, FunctionType, DefId};
-use crate::ssa::SsaStatement;
+
+
+use fxhash::FxHashMap;
 
 use super::{Definition, Definitions};
 
@@ -38,6 +40,14 @@ pub enum HirExpr{
     Unreachable,
 }
 
+#[derive(Copy, Clone, Debug, Hash,PartialEq,Eq)]
+pub enum ExprCategory{
+    Lvalue,
+    Rvalue,
+    Signal
+}
+
+
 impl core::fmt::Display for HirExpr{
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
         match self{
@@ -61,7 +71,7 @@ impl core::fmt::Display for HirExpr{
                 ty.fmt(f)?;
                 f.write_str(")")
             },
-            HirExpr::Unreachable => f.write_str("unreachable")
+            HirExpr::Unreachable => f.write_str("unreachable"),
         }
     }
 }
@@ -153,7 +163,7 @@ impl core::fmt::Display for HirStatement{
 pub struct HirConverter<'a>{
     defs: &'a mut Definitions,
     local_tys: Vec<Type>,
-    binding_names: HashMap<String,HirVarId>,
+    binding_names: FxHashMap<String,HirVarId>,
     stats: Vec<HirStatement>,
     storage_expr: Option<Box<dyn FnMut(&mut HirConverter<'a>,HirExpr)->HirStatement>>,
     storage_expr_stack: VecDeque<Box<dyn FnMut(&mut HirConverter<'a>,HirExpr)->HirStatement>>,
@@ -164,7 +174,7 @@ pub struct HirConverter<'a>{
 
 impl<'a> HirConverter<'a>{
     pub fn new(defs: &'a mut Definitions, fnty: &'a FunctionType, cur_mod: DefId) -> Self{
-        Self{defs, local_tys: Vec::new(), binding_names: HashMap::new(), stats: Vec::new(), outer_blocks: VecDeque::new(), fnty, storage_expr: None, storage_expr_stack: VecDeque::new(), cur_mod}
+        Self{defs, local_tys: Vec::new(), binding_names: HashMap::with_hasher(BuildHasherDefault::default()), stats: Vec::new(), outer_blocks: VecDeque::new(), fnty, storage_expr: None, storage_expr_stack: VecDeque::new(), cur_mod}
     }
 
     pub fn allocate_local(&mut self, ty: Type) -> HirVarId{

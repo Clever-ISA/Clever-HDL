@@ -512,6 +512,19 @@ pub enum TriggerType {
     Biedge,
 }
 
+
+impl core::fmt::Display for TriggerType{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Self::RisingEdge => f.write_str("rising_edge"),
+            Self::FallingEdge => f.write_str("falling_edge"),
+            Self::HighSignal => f.write_str("high_signal"),
+            Self::LowSignal => f.write_str("low_signal"),
+            Self::Biedge => f.write_str("biedge"),
+        }
+    }
+}
+
 impl Display for BinaryOp {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {

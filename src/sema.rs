@@ -21,17 +21,21 @@ use std::{
     convert,
 };
 
+use fxhash::FxHashMap;
+
 pub use crate::parse::{AsyncFnTy, Meta, Mutability, Safety, SignalDirection};
-pub use crate::ssa::SsaExpr;
+
 use crate::{
     lang::{LangItem, LangItemTarget},
     parse::{self, Mod, Path, Pattern, Visibility},
-    ssa::BasicBlock,
+
 };
 
 use self::hir::HirConverter;
 
 pub mod hir;
+pub mod mir;
+pub mod tycheck;
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DefId(u64);
@@ -77,6 +81,7 @@ pub enum DefinitionInner {
     Signal(Type, SignalDirection),
     Module(Module),
     UserType(UserType),
+    Alias(Type),
     Static {
         ty: Type,
         mutability: Mutability,
@@ -86,7 +91,9 @@ pub enum DefinitionInner {
         ty: Type,
         val: ConstVal,
     },
-    HirFunction(FunctionType, Vec<hir::HirStatement>)
+    HirFunction(FunctionType, Vec<hir::HirStatement>),
+    ThirFunction(FunctionType, Vec<tycheck::ThirStatement>),
+    MirFunction(FunctionType,Vec<mir::BasicBlock>),
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -171,6 +178,45 @@ pub enum Type {
     Inferable,
     Str,
     Slice(Box<Type>),
+    InferableInteger,
+}
+
+impl Type{
+    pub const UNIT: Self = Self::Tuple(Vec::new());
+
+    pub fn is_type_copy(&self, defs: &mut Definitions) -> bool{
+        match self{
+            Type::IncompleteAlias(def) => {
+                match &defs.get_definition(*def).def{
+                    DefinitionInner::Alias(ty) => ty.clone().is_type_copy(defs),
+                    _ => unreachable!()
+                }
+            }
+            Type::Array(inner, _) => inner.is_type_copy(defs),
+            Type::Tuple(inner) => inner.iter().all(|ty|ty.is_type_copy(defs)),
+            Type::IntegerType(_) | Type::Logic(_) | Type::FnPtr(_) | Type::FnItem(_, _) | Type::Char | Type::Signal(_, _, _) | Type::InferableInteger | Type::Never | Type::Pointer(_, _) => true,
+            Type::Inferable => panic!("Type must be known by this point"), // `is_type_copy` should follow any replacement
+            Type::UserDef(defid) => false, // for now
+            Type::GenericParam(_) => todo!(),
+            Type::Str => false,
+            Type::Slice(_) => false,
+        }
+    }
+
+    pub fn is_type_pollable(&self, defs: &mut Definitions) -> bool{
+        match self{
+            Type::IncompleteAlias(def) => {
+                match &defs.get_definition(*def).def{
+                    DefinitionInner::Alias(ty) => ty.clone().is_type_pollable(defs),
+                    _ => unreachable!()
+                }
+            }
+            Type::Logic(_) => true,
+            Type::GenericParam(_) => todo!(),
+            Type::Inferable => panic!("Type must be known by this point"),
+            _ => false,
+        }
+    }
 }
 
 impl core::fmt::Display for Type {
@@ -238,6 +284,7 @@ impl core::fmt::Display for Type {
                 ty.fmt(f)?;
                 f.write_str("]")
             }
+            Type::InferableInteger => f.write_str("{{integer}}"),
         }
     }
 }
@@ -364,7 +411,6 @@ pub enum ConstVal {
         name: Option<String>,
         inner: CtorConst,
     },
-    Complex(Vec<BasicBlock>),
     IncompleteExpr,
     TupleConst(Vec<ConstVal>),
 }
@@ -435,7 +481,6 @@ impl core::fmt::Display for ConstVal {
                     }
                 }
             }
-            ConstVal::Complex(_) => todo!("complex expr"),
             ConstVal::IncompleteExpr => f.write_str("/* incomplete */"),
             ConstVal::TupleConst(tup) => {
                 f.write_str("(")?;
@@ -467,8 +512,8 @@ pub struct Definitions {
     nextdefid: DefId,
     curcrate: DefId,
     defs: BTreeMap<DefId, Definition>,
-    crates: HashMap<String, DefId>,
-    lang_items: HashMap<LangItem, DefId>,
+    crates: FxHashMap<String, DefId>,
+    lang_items: FxHashMap<LangItem, DefId>,
 }
 
 impl Definitions {
@@ -769,6 +814,94 @@ impl Definitions {
                 }
                 f.write_str("}")
             },
+            DefinitionInner::MirFunction(fnty, blocks) => {
+                if fnty.constness == Mutability::Const {
+                    f.write_str("const ")?;
+                }
+
+                if fnty.safety == Safety::Unsafe {
+                    f.write_str("unsafe ")?;
+                }
+
+                match fnty.async_ty {
+                    AsyncFnTy::Normal => f.write_str("fn ")?,
+                    AsyncFnTy::Async => f.write_str("async fn ")?,
+                    AsyncFnTy::Entity => f.write_str("entity ")?,
+                    AsyncFnTy::Procedure => f.write_str("proc ")?,
+                }
+
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str(" */")?;
+
+                f.write_str("(")?;
+
+                let mut sep = "";
+
+                for (i, ty) in fnty.params.iter().enumerate() {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    f.write_fmt(format_args!("_{}: {}", i, ty))?;
+                }
+                f.write_str(") -> ")?;
+                fnty.retty.fmt(f)?;
+                f.write_str("{\n")?;
+                for bb in blocks{
+                    bb.fmt(f)?;
+                    f.write_str("\n")?;
+                }
+                f.write_str("}")
+            },
+            DefinitionInner::ThirFunction(fnty, stats) => {
+                if fnty.constness == Mutability::Const {
+                    f.write_str("const ")?;
+                }
+
+                if fnty.safety == Safety::Unsafe {
+                    f.write_str("unsafe ")?;
+                }
+
+                match fnty.async_ty {
+                    AsyncFnTy::Normal => f.write_str("fn ")?,
+                    AsyncFnTy::Async => f.write_str("async fn ")?,
+                    AsyncFnTy::Entity => f.write_str("entity ")?,
+                    AsyncFnTy::Procedure => f.write_str("proc ")?,
+                }
+
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str(" */")?;
+
+                f.write_str("(")?;
+
+                let mut sep = "";
+
+                for (i, ty) in fnty.params.iter().enumerate() {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    f.write_fmt(format_args!("_{}: {}", i, ty))?;
+                }
+                f.write_str(") -> ")?;
+                fnty.retty.fmt(f)?;
+                f.write_str("{\n")?;
+                for stat in stats{
+                    stat.fmt(f)?;
+                    f.write_str("\n")?;
+                }
+                f.write_str("}")
+            },
+            DefinitionInner::Alias(ty) => {
+                f.write_str("type ")?;
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str(" */")?;
+                f.write_str(" = ")?;
+                ty.fmt(f)?;
+                f.write_str(";")
+            },
         }
     }
 }
@@ -814,8 +947,8 @@ impl Definitions {
             nextdefid: DefId(1),
             curcrate: DefId(0),
             defs: BTreeMap::new(),
-            crates: HashMap::new(),
-            lang_items: HashMap::new(),
+            crates: FxHashMap::with_hasher(Default::default()),
+            lang_items: FxHashMap::with_hasher(Default::default()),
         }
     }
     pub fn next_defid(&mut self) -> DefId {
@@ -1545,7 +1678,9 @@ pub fn convert_top_const_expr(
                             | DefinitionInner::Static { .. }
                             | DefinitionInner::Const { .. }
                             | DefinitionInner::Signal(_, _)
-                            | DefinitionInner::HirFunction(_, _) => panic!("Not a type"),
+                            | DefinitionInner::HirFunction(_, _)
+                            | DefinitionInner::ThirFunction(_, _)
+                            | DefinitionInner::MirFunction(_, _) => panic!("Not a type"),
                             DefinitionInner::Module(_) => {
                                 if let Some(val) = defs
                                     .find_val_in_mod(ty, &id)
@@ -1562,6 +1697,7 @@ pub fn convert_top_const_expr(
                                 }
                             }
                             DefinitionInner::UserType(_) => todo!("Constructor"),
+                            DefinitionInner::Alias(_) => todo!("Non-canonical type name"),
                             DefinitionInner::Empty => unreachable!(),
                         },
                         _ => todo!("Unexpected generics on module {:?}", path),
@@ -1604,7 +1740,9 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
             | parse::Item::Const { .. }
             | parse::Item::Signal { .. }
             | parse::Item::FnDeclaration { .. } => {}
-            parse::Item::Type(_) => todo!(),
+            parse::Item::Type(_) => todo!(
+                "struct"
+            ),
             parse::Item::Mod {
                 name,
                 vis,
@@ -1906,6 +2044,77 @@ pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
     }
 }
 
+pub fn tycheck_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
+    for item in &ast_mod.items{
+        match item{
+            parse::Item::FnDeclaration { name, .. } => {
+                let defid = defs.find_val_in_mod(sema_mod, name).unwrap();
+
+                let stats = replace_with::replace_with_or_abort_and_return(&mut defs.get_definition(defid).def, |f|{
+                    match f{
+                        DefinitionInner::HirFunction(fnty, stats) => (stats,DefinitionInner::IncompleteFunction(fnty)),
+                        _ => unreachable!()
+                    }
+                });
+
+                let mut tyinfo = tycheck::ScopeTypeInfo{
+                    defs,
+                    localmuts: FxHashMap::with_hasher(Default::default()),
+                    localtys: FxHashMap::with_hasher(Default::default()),
+                    parent: defid
+                };
+
+                let stats = stats.into_iter().map(|stat| tycheck::tycheck_stat(&mut tyinfo, stat, false)).collect::<Result<Vec<_>,_>>().unwrap();
+                replace_with::replace_with_or_abort(&mut defs.get_definition(defid).def, |f|{
+                    match f{
+                        DefinitionInner::IncompleteFunction(fnty) => DefinitionInner::ThirFunction(fnty, stats),
+                        _ => unreachable!()
+                    }
+                })
+            }
+            parse::Item::Mod { name, content: Some(md), .. } => {
+                let defid = defs.find_type_in_mod(sema_mod, name)?;
+                tycheck_crate(defs, defid, md);   
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn lower_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
+    for item in &ast_mod.items{
+        match item{
+            parse::Item::FnDeclaration { name, .. } => {
+                let defid = defs.find_val_in_mod(sema_mod, name).unwrap();
+
+                let (fnty,stats) = replace_with::replace_with_or_abort_and_return(&mut defs.get_definition(defid).def, |f|{
+                    match f{
+                        DefinitionInner::ThirFunction(fnty, stats) => ((fnty,stats),DefinitionInner::Empty),
+                        _ => unreachable!()
+                    }
+                });
+
+                let mut mir_builder = mir::FunctionConvert::new(&fnty, defs);
+
+                for stat in stats{
+                    mir_builder.convert_thir_stat(stat);
+                }
+                let mut blocks = mir_builder.build();
+
+                for &opt in crate::opt::OPT_PASSES{
+                    opt.transform_fn(&mut blocks, defs);
+                }
+                defs.get_definition(defid).def = DefinitionInner::MirFunction(fnty, blocks);
+            }
+            parse::Item::Mod { name, content: Some(md), .. } => {
+                let defid = defs.find_type_in_mod(sema_mod, name)?;
+                tycheck_crate(defs, defid, md);   
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     let root_defid = defs.next_defid();
     let sema_mod = Module {
@@ -1927,4 +2136,6 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     collect_value_names(defs, root_mod, root_defid);
     convert_types(defs, root_mod, root_defid);
     convert_items(defs, root_mod, root_defid);
+    tycheck_crate(defs, root_defid, root_mod);
+    lower_crate(defs,root_defid,root_mod);
 }
