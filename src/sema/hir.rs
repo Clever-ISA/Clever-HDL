@@ -6,7 +6,7 @@ pub use crate::parse::{BinaryOp,UnaryOp,Mutability};
 
 use crate::parse::{self, PathComponent};
 
-pub use crate::sema::{ConstVal,Type, FunctionType, DefId};
+pub use crate::sema::{ConstVal,Type, FunctionType, DefId,FieldName};
 
 
 use fxhash::FxHashMap;
@@ -29,6 +29,19 @@ impl core::fmt::Display for HirVarId{
     }
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct HirFieldInit{
+    pub name: FieldName,
+    pub value: HirExpr,
+}
+
+impl core::fmt::Display for HirFieldInit{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        self.name.fmt(f)?;
+        f.write_str(": ")?;
+        self.value.fmt(f)
+    }
+}
 
 #[derive(Clone, Debug, Hash,PartialEq,Eq)]
 pub enum HirExpr{
@@ -38,6 +51,7 @@ pub enum HirExpr{
     Const(ConstVal),
     Cast(Box<HirExpr>,Type),
     Unreachable,
+    Constructor(DefId,Vec<HirFieldInit>,Option<Box<HirExpr>>)
 }
 
 #[derive(Copy, Clone, Debug, Hash,PartialEq,Eq)]
@@ -72,6 +86,25 @@ impl core::fmt::Display for HirExpr{
                 f.write_str(")")
             },
             HirExpr::Unreachable => f.write_str("unreachable"),
+            HirExpr::Constructor(defid, fields,tailinit) => {
+                defid.fmt(f)?;
+                f.write_str("{")?;
+                let mut sep = "";
+
+                for field in fields{
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    field.fmt(f)?;
+                }
+
+                if let Some(tailinit) = tailinit{
+                    f.write_str(sep)?;
+                    f.write_str("..")?;
+                    tailinit.fmt(f)?;
+                }
+
+                f.write_str("}")
+            }
         }
     }
 }
@@ -93,7 +126,7 @@ pub enum HirStatement{
     Return(HirExpr),
     Loop(Vec<HirStatement>),
     AwaitSignal(HirExpr, TriggerType),
-    Discard(HirExpr),
+    Discard(HirExpr,bool),
 }
 
 
@@ -152,7 +185,7 @@ impl core::fmt::Display for HirStatement{
                     TriggerType::LowSignal => f.write_str("low_signal;")
                 }
             },
-            HirStatement::Discard(expr) => {
+            HirStatement::Discard(expr,_) => {
                 expr.fmt(f)?;
                 f.write_str(";")
             },
@@ -218,7 +251,7 @@ impl<'a> HirConverter<'a>{
             parse::Block::Loop(items) => {
                 let current_block = core::mem::take(&mut self.stats);
                 self.outer_blocks.push_back(current_block);
-                if let Some(storage_expr) = self.storage_expr.replace(Box::new(|_,expr| HirStatement::Discard(expr))){
+                if let Some(storage_expr) = self.storage_expr.replace(Box::new(|_,expr| HirStatement::Discard(expr,true))){
                     self.storage_expr_stack.push_back(storage_expr);
                 }
                 for item in items{
@@ -253,9 +286,28 @@ impl<'a> HirConverter<'a>{
             },
             parse::BlockItem::Discard(e) => {
                 let expr = self.convert_expression(e);
-                self.stats.push(HirStatement::Discard(expr))
+                self.stats.push(HirStatement::Discard(expr,true))
             },
-            parse::BlockItem::Let { pattern, ty, value } => todo!(),
+            parse::BlockItem::Let { pattern, ty, value } => {
+                if let parse::Pattern::Discard = pattern{
+                    if let Some(value) = value{
+                        let expr = self.convert_expression(value);
+                        self.stats.push(HirStatement::Discard(expr, ty.is_some()))
+                    }
+                }else{
+                    let ty = ty.as_ref().map(|ty| super::convert_type(self.defs, self.cur_mod, ty)).unwrap_or(Type::Inferable);
+                    let varid = self.allocate_local(ty.clone());
+
+
+                    let value = value.as_ref().map(|expr|self.convert_expression(expr));
+
+
+                    self.stats.push(HirStatement::Let { id: varid, mutability: Mutability::Mut, ty, init: value });
+
+                    self.bind_locals(varid, pattern);
+
+                }
+            },
             parse::BlockItem::Block(b) => {
                 self.convert_block(b);
             },
@@ -307,7 +359,25 @@ impl<'a> HirConverter<'a>{
             parse::Expr::Parentheses(_) => todo!(),
             parse::Expr::MacroExpansion { .. } => unreachable!(),
             parse::Expr::IntLiteral(_) => todo!(),
-            parse::Expr::StructConstructor(_, _) => todo!(),
+            parse::Expr::StructConstructor(expr, fields) => {
+                let def = self.defs.find_type_def(self.cur_mod, expr);
+
+                if let Some(def) = def{
+                    match &self.defs.get_definition(def).def{
+                        super::DefinitionInner::UserType(super::UserType::Struct(_)) | super::DefinitionInner::IncompleteType => {
+                            let init = fields.iter().map(|init|{
+                                let name = init.name.clone();
+                                let expr = self.convert_expression(&init.expr);
+                                HirFieldInit{name,value: expr}
+                            }).collect::<Vec<_>>();
+                            HirExpr::Constructor(def, init, None)
+                        }
+                        _ => panic!("Not a type {}",expr)
+                    }
+                }else{
+                    todo!()
+                }
+            },
             parse::Expr::Field(_, _) => todo!(),
             parse::Expr::Await(_) => todo!(),
             parse::Expr::AwaitSignal(tt, inner) => {

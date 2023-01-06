@@ -299,7 +299,7 @@ impl core::fmt::Display for Meta {
             Self::IntLit(int) => int.fmt(f),
             Self::Group(id, nested) => {
                 id.fmt(f)?;
-                f.write_str("(");
+                f.write_str("(")?;
                 let mut sep = "";
 
                 for inner in nested {
@@ -346,6 +346,8 @@ pub enum Pattern {
     Or(Box<Pattern>, Box<Pattern>), // pat1 | pat2
     SelfPat,
 }
+
+
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum FieldPattern {
@@ -407,6 +409,33 @@ pub enum PathComponent {
 pub struct Path {
     pub root: Option<PathRoot>,
     pub components: Vec<PathComponent>,
+}
+
+impl core::fmt::Display for Path{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        let mut sep = "";
+        if let Some(root) = &self.root{
+            sep = "::";
+            match root{
+                PathRoot::Root => {},
+                PathRoot::QSelf(_, _) => todo!(),
+                PathRoot::SelfPath => f.write_str("self")?,
+                PathRoot::Super => f.write_str("super")?,
+                PathRoot::Crate => f.write_str("crate")?,
+                PathRoot::SelfTy => f.write_str("Self")?,
+            }
+        }
+
+        for comp in &self.components{
+            f.write_str(sep)?;
+            sep = "::";
+            match comp{
+                PathComponent::Id(id) => f.write_str(id)?,
+                PathComponent::Generics(generic) =>todo!(),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -653,6 +682,15 @@ pub enum ArrayCtor {
 pub enum FieldName {
     Id(String),
     Tuple(u32),
+}
+
+impl core::fmt::Display for FieldName{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            FieldName::Id(id) => id.fmt(f),
+            FieldName::Tuple(id) => id.fmt(f),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]

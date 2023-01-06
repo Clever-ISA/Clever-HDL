@@ -3,6 +3,7 @@ pub enum LangItemTarget {
     Function,
     Adt,
     Constructor,
+    Struct,
     Trait,
     AssociatedType,
     Item,
@@ -46,6 +47,7 @@ def_lang_items![
     sized: {Sized @ Trait},
     copy: {Copy @ Trait},
     clone: {Clone @ Trait},
+    drop: {Drop @ Trait},
     fn_once: {FnOnce @ Trait},
     fn_mut: {FnMut @ Trait},
     fn: {Fn @ Trait},
@@ -57,4 +59,5 @@ def_lang_items![
     phantom_data: {PhantomData @ Adt},
     sync: {Sync @ Trait},
     main: {Main @ Function},
+    manually_drop: {ManuallyDrop @ Struct},
 ];

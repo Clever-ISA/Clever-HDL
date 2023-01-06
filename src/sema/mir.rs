@@ -4,13 +4,13 @@ use crate::utils::*;
 
 use crate::parse::Pattern;
 pub use crate::parse::{BinaryOp, TriggerType, UnaryOp, Mutability};
-pub use crate::sema::{ConstVal, IntType, LogicType, Type};
+pub use crate::sema::{ConstVal, IntType, LogicType, Type,FieldName};
 pub use crate::sema::tycheck::ValueCategory;
-use crate::sema::{Definitions, FunctionType};
+use crate::sema::{Definitions, FunctionType,DefId};
 
 use crate::sema::hir;
 
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap,FxHashSet};
 
 use super::hir::HirVarId;
 use super::tycheck::{ThirExpr, ThirStatement, ThirExprInner};
@@ -52,6 +52,21 @@ impl core::fmt::Display for SsaExpr{
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct SsaFieldInit{
+    pub name: FieldName,
+    pub init: SsaExpr,
+}
+
+impl core::fmt::Display for SsaFieldInit{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        self.name.fmt(f)?;
+        f.write_str(": ")?;
+        self.init.fmt(f)
+    }
+}
+
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum SsaExprInner {
     Local(SsaVarId),
     Const(ConstVal),
@@ -62,6 +77,7 @@ pub enum SsaExprInner {
     Copy(Box<SsaExpr>),
     Read(Box<SsaExpr>),
     Unreachable,
+    Ctor(DefId, Vec<SsaFieldInit>, Option<Box<SsaExpr>>)
 }
 
 impl SsaExprInner{
@@ -76,6 +92,9 @@ impl SsaExprInner{
             Self::Move(inner) => inner.has_side_effects(),
             Self::Copy(inner) => inner.has_side_effects(),
             Self::Read(inner) => inner.has_side_effects(),
+            Self::Ctor(_, fields, rest) => {
+                fields.iter().any(|field| field.init.has_side_effects())||rest.as_ref().map(|stat| stat.has_side_effects()).unwrap_or(false)
+            }
         }
     }
 }
@@ -115,7 +134,23 @@ impl core::fmt::Display for SsaExprInner{
                 right.fmt(f)?;
                 f.write_str(")")
             }
-            SsaExprInner::Unreachable => f.write_str("unreachable")
+            SsaExprInner::Unreachable => f.write_str("unreachable"),
+            SsaExprInner::Ctor(defid, fields, rest) => {
+                defid.fmt(f)?;
+                f.write_str("{")?;
+                let mut sep = "";
+                for field in fields{
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    field.fmt(f)?;
+                }
+
+                if let Some(rest) = rest{
+                    f.write_str(sep)?;
+                    rest.fmt(f)?;
+                }
+                f.write_str("}")
+            }
         }
     }
 }
@@ -311,7 +346,7 @@ impl core::fmt::Display for SsaTerminator{
                 f.write_str("return ")?;
                 expr.fmt(f)
             }
-            Self::Switch(switch) => switch.fmt(f)
+            Self::Switch(switch) => switch.fmt(f),
         }
     }
 }
@@ -321,6 +356,7 @@ impl core::fmt::Display for SsaTerminator{
 pub enum SsaStatement {
     Declare { var: SsaVarId, ty: Type, init: SsaExpr },
     StoreDead(SsaVarId),
+    Pin(SsaVarId),
 }
 
 impl core::fmt::Display for SsaStatement{
@@ -337,6 +373,11 @@ impl core::fmt::Display for SsaStatement{
             Self::StoreDead(var) => {
                 f.write_str("StoreDead(")?;
                 var.fmt(f)?;
+                f.write_str(");")
+            }
+            Self::Pin(id) => {
+                f.write_str("Pin(")?;
+                id.fmt(f)?;
                 f.write_str(");")
             }
         }
@@ -392,6 +433,7 @@ pub struct FunctionConvert<'a> {
     basic_blocks: Vec<BasicBlock>,
     cur_bb: UnbuiltBasicBlock,
     local_names: FxHashMap<HirVarId, SsaVarId>,
+    pinned_locals: FxHashSet<SsaVarId>,
     known_locals: Vec<HirVarId>,
     var_tys: FxHashMap<HirVarId,Type>
 }
@@ -415,6 +457,7 @@ impl<'a> FunctionConvert<'a> {
                 stats: Vec::new(),
             },
             local_names: FxHashMap::with_hasher(BuildHasherDefault::default()),
+            pinned_locals: FxHashSet::with_hasher(Default::default()),
             known_locals: Vec::new(),
             var_tys: FxHashMap::with_hasher(Default::default())
         }
@@ -447,6 +490,18 @@ impl<'a> FunctionConvert<'a> {
                 SsaExprInner::Local(ssaloc)
             }
             ThirExprInner::Const(val) => SsaExprInner::Const(val),
+            ThirExprInner::Constructor(defid, fields,rest ) => {
+                let fields = fields.into_iter().map(|expr|{
+                    let init = self.convert_thir_expr(expr.init);
+                    SsaFieldInit{name: expr.name, init}
+                }).collect::<Vec<_>>();
+
+                let rest = rest.map(|rest|{
+                    Box::new(self.convert_thir_expr(*rest))
+                });
+
+                SsaExprInner::Ctor(defid, fields, rest)
+            }
             expr => todo!("{}",expr)
         };
         SsaExpr { ty, cat, inner}
@@ -527,6 +582,19 @@ impl<'a> FunctionConvert<'a> {
                 let nextbb = self.cur_bb.build_and_reset(SsaTerminator::Return(expr));
                 self.cur_bb.id = self.nextbb.fetch_and_increment();
                 self.basic_blocks.push(nextbb);
+            }
+            ThirStatement::Let { id, mutability, ty, init } => {
+                if let Some(init) = init{
+                    let var = SsaVarId(self.nextlocal.fetch_and_increment());
+                    let init = self.convert_thir_expr(init);
+                    if ty.has_destructor(self.defs){
+                        self.pinned_locals.insert(var);
+                    }
+                    self.cur_bb.stats.push(SsaStatement::Declare { var, ty, init});
+                    self.local_names.insert(id,var);
+
+                    
+                }
             }
             stat => todo!("{}",stat)
         }

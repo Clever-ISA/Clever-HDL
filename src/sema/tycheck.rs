@@ -5,7 +5,7 @@ use replace_with::replace_with_or_abort;
 
 pub use super::{Type,DefId};
 pub use crate::parse::{UnaryOp,BinaryOp};
-use super::{Definitions,DefinitionInner, FunctionType, hir::{HirStatement, HirExpr, HirVarId}, Mutability, Safety, ConstVal, SignalDirection};
+use super::{Definitions,DefinitionInner, FunctionType, hir::{HirStatement, HirExpr, HirVarId}, Mutability, Safety, ConstVal, SignalDirection, FieldName};
 
 use crate::parse::TriggerType;
 
@@ -30,6 +30,8 @@ pub enum TypecheckError{
     FailedToUnify,
     InferenceError,
     NoCoercion,
+    CannotMove,
+    Private,
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -192,6 +194,20 @@ impl core::fmt::Display for ThirExpr{
 }
 
 #[derive(Clone, Debug, Hash,PartialEq,Eq)]
+pub struct ThirFieldInit{
+    pub name: FieldName,
+    pub init: ThirExpr
+}
+
+impl core::fmt::Display for ThirFieldInit{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        self.name.fmt(f)?;
+        f.write_str(": ")?;
+        self.init.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug, Hash,PartialEq,Eq)]
 pub enum ThirExprInner{
     Local(HirVarId),
     BinaryOp(BinaryOp,Box<ThirExpr>,Box<ThirExpr>),
@@ -201,7 +217,8 @@ pub enum ThirExprInner{
     Unreachable,
     ReadSignal(Box<ThirExpr>),
     Place2Val(Box<ThirExpr>),
-    MaterializePlace(Box<ThirExpr>)
+    MaterializePlace(Box<ThirExpr>),
+    Constructor(DefId,Vec<ThirFieldInit>,Option<Box<ThirExpr>>)
 }
 
 impl core::fmt::Display for ThirExprInner{
@@ -240,6 +257,23 @@ impl core::fmt::Display for ThirExprInner{
                 f.write_str("materialize ")?;
                 expr.fmt(f)
             },
+            ThirExprInner::Constructor(defid, fields, rest) => {
+                defid.fmt(f)?;
+                f.write_str("{")?;
+                let mut sep = "";
+
+                for field in fields{
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    field.fmt(f)?;
+                }
+                if let Some(rest) = rest{
+                    f.write_str(sep)?;
+                    f.write_str("..")?;
+                    rest.fmt(f)?;
+                }
+                f.write_str("}")
+            }
         }
     }
 }
@@ -249,7 +283,46 @@ pub struct ScopeTypeInfo<'defs>{
     pub defs: &'defs mut Definitions,
     pub localmuts: FxHashMap<HirVarId,Mutability>,
     pub localtys: FxHashMap<HirVarId,Type>,
+    pub field_cache: FxHashMap<DefId,FxHashMap<FieldName,Type>>,
     pub parent: DefId,
+    pub cur_mod: DefId,
+}
+
+impl<'defs> ScopeTypeInfo<'defs>{
+    pub fn get_ctor_field_type(&mut self, def: DefId, fname: &FieldName) -> Option<Type>{
+        self.field_cache.entry(def).or_insert_with(||{
+            match &self.defs.get_definition_immut(def).def{
+                DefinitionInner::UserType(ty) => {
+                    let mut field_tys = FxHashMap::with_hasher(Default::default());
+                    match ty{
+                        super::UserType::Enum(_) => todo!(),
+                        super::UserType::Struct(ctor) => {
+                            match ctor{
+                                super::Constructor::Unit => {},
+                                super::Constructor::Tuple(fields) => {
+                                    for (i,field) in fields.iter().enumerate(){
+                                        if self.defs.visible_from(self.cur_mod, field.visible_from){
+                                            field_tys.insert(FieldName::Tuple(i.try_into().unwrap()), field.ty.clone());
+                                        }
+                                    }
+                                },
+                                super::Constructor::Struct(fields) => {
+                                    for field in fields.iter(){
+                                        if self.defs.visible_from(self.cur_mod, field.visible_from){
+                                            field_tys.insert(FieldName::Id(field.name.clone()),field.ty.clone());
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                        super::UserType::Union(_) => todo!(),
+                    }
+                    field_tys
+                }
+                _ => unreachable!()
+            }
+        }).get(fname).cloned()
+    }
 }
 
 pub fn tycheck_expr(defs: &mut ScopeTypeInfo, mut expr: HirExpr, against_ty: Option<&mut Type>,is_unsafe: bool) -> Result<ThirExpr,TypecheckError>{
@@ -310,7 +383,36 @@ pub fn tycheck_expr(defs: &mut ScopeTypeInfo, mut expr: HirExpr, against_ty: Opt
 
             Ok(ThirExpr { ty, cat, expr: ThirExprInner::Const(val.clone()) })
         }
-        _ => todo!()
+        HirExpr::Constructor(defid, inits, rest)=> {
+            let mut definite_type = Type::UserDef(defid);
+
+            if defs.defs.has_invisible_fields(defs.cur_mod, defid){
+                return Err(TypecheckError::Private);
+            }
+
+            let rest = rest.map(|b|*b).map(|expr|tycheck_expr(defs, expr, Some(&mut definite_type), is_unsafe))
+                .transpose()?
+                .map(|expr|into_value(defs, expr)).transpose()?
+                .map(Box::new)
+                ;
+
+            
+            let inits = inits.into_iter().map(|init|{
+                let name = init.name;
+                let value = init.value;
+
+                let mut ty = defs.get_ctor_field_type(defid, &name).ok_or(TypecheckError::Private)?;
+
+                let init = tycheck_expr(defs, value, Some(&mut ty), is_unsafe)?;
+
+                Ok(ThirFieldInit{name,init})
+            }).collect::<Result<Vec<_>,_>>()?;
+
+            let expr = ThirExprInner::Constructor(defid, inits, rest);
+
+            Ok(ThirExpr{ty: definite_type,cat: ValueCategory::Value,expr})
+        }
+        expr => todo!("{expr}")
     }
 }
 
@@ -398,14 +500,41 @@ impl core::fmt::Display for ThirStatement{
     }
 }
 
+pub fn into_value(defs: &mut ScopeTypeInfo, expr: ThirExpr) -> Result<ThirExpr,TypecheckError>{
+    match expr.cat{
+        ValueCategory::Value => Ok(expr),
+        ValueCategory::Place(_,_)  => {
+            let ty = expr.ty.clone();
+
+            let expr = ThirExprInner::Place2Val(Box::new(expr));
+
+            Ok(ThirExpr{ty, cat: ValueCategory::Value, expr})
+        }
+        ValueCategory::SignalPlace(SignalDirection::In | SignalDirection::Inout) => {
+            let ty = expr.ty.clone();
+
+            let expr = ThirExprInner::ReadSignal(Box::new(expr));
+
+            Ok(ThirExpr{ty, cat: ValueCategory::Value, expr})
+        },
+        ValueCategory::SignalPlace(_) => Err(TypecheckError::CannotMove)
+    }
+}
+
 pub fn tycheck_stat(defs: &mut ScopeTypeInfo, stat: HirStatement, is_unsafe: bool) -> Result<ThirStatement,TypecheckError>{
     match stat{
         HirStatement::Loop(inner) => {
             let inner = inner.into_iter().map(|stat| tycheck_stat(defs,stat,is_unsafe)).collect::<Result<Vec<_>,_>>()?;
             Ok(ThirStatement::Loop(inner))
         }
-        HirStatement::Discard(expr) => {
-            Ok(ThirStatement::Discard(tycheck_expr(defs,expr,None,is_unsafe)?))
+        HirStatement::Discard(expr,force_rvalue) => {
+            let thirexpr = tycheck_expr(defs,expr,None,is_unsafe)?;
+            let thirexpr = if force_rvalue {
+                into_value(defs,thirexpr)?
+            }else{
+                thirexpr
+            };
+            Ok(ThirStatement::Discard(thirexpr))
         }
         HirStatement::AwaitSignal(expr, trig) => {
             let mut expr = tycheck_expr(defs, expr, None, is_unsafe)?;
@@ -431,6 +560,16 @@ pub fn tycheck_stat(defs: &mut ScopeTypeInfo, stat: HirStatement, is_unsafe: boo
 
             Ok(ThirStatement::Return(tycheck_expr(defs, expr, Some(&mut against_ty), is_unsafe)?))
         }
-        _ => todo!()
+        HirStatement::Let { id, mutability, ty: mut ty, init } => {
+            let init = init.map(|expr|{
+                tycheck_expr(defs,expr,Some(&mut ty),is_unsafe)
+            }).transpose()?;
+
+            defs.localmuts.insert(id,mutability);
+            defs.localtys.insert(id,ty.clone());
+
+            Ok(ThirStatement::Let { id, mutability, ty, init })
+        }
+        stat => todo!("{}",stat)
     }
 }

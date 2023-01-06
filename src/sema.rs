@@ -16,6 +16,57 @@ macro_rules! matches_simple_path{
     };
 }
 
+macro_rules! matches_meta{
+    ($e:expr, $(:: $(@@ $_gs:tt)?)? $($parts:ident)::+) => {
+        match $e{
+            $crate::parse::Meta::Ident(id) => matches_simple_path!(id,$(:: $(@@ $_gs)?)? $($parts)::+),
+            _ => false
+        }
+    };
+    ($e:expr, $(:: $(@@ $_gs:tt)?)? $($parts:ident)::+ ($($(:: $(@@ $_gs_inner:tt)?)? $($parts_inner:ident)::+ $(= $lit:literal)? $(($($tt:tt)*))?),* $(,)?)) => {
+        match $e{
+            $crate::parse::Meta::Group(id,group) => {
+                // this is so cursed
+                // It's like I"m writing Yandros code here
+                let match_parts: &[fn(&$crate::parse::Meta)->bool] = &[$(|meta|matches_meta!(meta,$(:: $(@@ $_gs_inner)?)? $($parts_inner)::+ $(= $lit)? $(($($tt)*))?)),*];
+                matches_simple_path!(id, $(:: $(@@ $_gs:tt)?)? $($parts)::+)&&group.len()==match_parts.len()&&group.iter().zip(match_parts).all(|(meta,f)|f(meta))
+            }
+            _ => false,
+        }
+    };
+    ($e:expr, $(:: $(@@ $_gs:tt)?)? $($parts:ident)::+  = $lit:literal) => {
+        match &$e{
+            $crate::parse::Meta::KeyValue(key,val) => {
+                trait ValidLiteral{
+                    fn matches_meta(self, meta: &$crate::parse::Meta) -> bool;
+                }
+
+                impl ValidLiteral for &'static str{
+                    fn matches_meta(self, meta: &$crate::parse::Meta) -> bool{
+                        match meta{
+                            $crate::parse::Meta::String(st) => self==st,
+                            _ => false,
+                        }
+                    }
+                }
+
+                impl ValidLiteral for i128{
+                    fn matches_meta(self, meta: &$crate::parse::Meta) -> bool{
+                        match meta{
+                            $crate::parse::Meta::IntLit(i) => self==i,
+                            _ => false,
+                        }
+                    }
+                }
+
+                matches_simple_path!(key, $(:: $(@@ $_gs:tt)?)? $($parts)::+)&&ValidLiteral::matches_meta($lit,val)
+                
+            }
+            _ => false,
+        };
+    }
+}
+
 use std::{
     collections::{BTreeMap, HashMap},
     convert,
@@ -27,7 +78,7 @@ pub use crate::parse::{AsyncFnTy, Meta, Mutability, Safety, SignalDirection};
 
 use crate::{
     lang::{LangItem, LangItemTarget},
-    parse::{self, Mod, Path, Pattern, Visibility},
+    parse::{self, Mod, Path, Pattern, Visibility, parse_visibility, TypeTag},
 
 };
 
@@ -70,6 +121,98 @@ pub enum UserType {
     Union(Vec<StructField>),
 }
 
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+pub enum TypeLifetime{
+    Static,
+    Generic(u32),
+}
+
+impl core::fmt::Debug for TypeLifetime{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Self::Static => f.write_str("'static"),
+            Self::Generic(n) => {
+                f.write_str("'")?;
+                n.fmt(f)
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for TypeLifetime{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Self::Static => f.write_str("'static"),
+            Self::Generic(n) => {
+                f.write_str("'")?;
+                n.fmt(f)
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum TraitBoundConst{
+    ConstIfConst,
+    Const
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct TraitBound{
+    pub opt_out: bool,
+    pub constness: Option<TraitBoundConst>,
+    pub traitdef: DefId,
+}
+
+impl core::fmt::Display for TraitBound{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        if self.opt_out{
+            f.write_str("?")?;
+        }
+
+        if let Some(constness) = self.constness{
+            match constness{
+                TraitBoundConst::ConstIfConst => f.write_str("~const ")?,
+                TraitBoundConst::Const => f.write_str("const ")?
+            }
+        }
+
+        self.traitdef.fmt(f)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum Supertrait{
+    Lifetime(TypeLifetime),
+    Trait(TraitBound)
+}
+
+impl core::fmt::Display for Supertrait{
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result{
+        match self{
+            Supertrait::Lifetime(life) => life.fmt(f),
+            Supertrait::Trait(id) => id.fmt(f)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TraitDef{
+    pub safety: Safety,
+    pub is_auto: bool,
+    pub supertraits: Vec<Supertrait>,
+    pub types: FxHashMap<String,DefId>,
+    pub values: FxHashMap<String,DefId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImplBlock{
+    pub ty: Type,
+    pub bound: Option<TraitBound>,
+    pub types: FxHashMap<String,DefId>,
+    pub values: FxHashMap<String,DefId>,
+}
+
 #[derive(Clone, Debug)]
 pub enum DefinitionInner {
     Empty,
@@ -78,6 +221,7 @@ pub enum DefinitionInner {
     IncompleteFunction(FunctionType),
     IncompleteStatic(Type),
     IncompleteConst(Type),
+    IncompleteTrait,
     Signal(Type, SignalDirection),
     Module(Module),
     UserType(UserType),
@@ -94,6 +238,9 @@ pub enum DefinitionInner {
     HirFunction(FunctionType, Vec<hir::HirStatement>),
     ThirFunction(FunctionType, Vec<tycheck::ThirStatement>),
     MirFunction(FunctionType,Vec<mir::BasicBlock>),
+    FunctionDecl(FunctionType),
+    Trait(TraitDef),
+    ImplBlock(ImplBlock),
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -114,6 +261,8 @@ impl core::fmt::Display for LogicType {
         }
     }
 }
+
+pub use parse::FieldName;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct IntType {
@@ -184,10 +333,10 @@ pub enum Type {
 impl Type{
     pub const UNIT: Self = Self::Tuple(Vec::new());
 
-    pub fn is_type_copy(&self, defs: &mut Definitions) -> bool{
+    pub fn is_type_copy(&self, defs: &Definitions) -> bool{
         match self{
             Type::IncompleteAlias(def) => {
-                match &defs.get_definition(*def).def{
+                match &defs.get_definition_immut(*def).def{
                     DefinitionInner::Alias(ty) => ty.clone().is_type_copy(defs),
                     _ => unreachable!()
                 }
@@ -203,10 +352,10 @@ impl Type{
         }
     }
 
-    pub fn is_type_pollable(&self, defs: &mut Definitions) -> bool{
+    pub fn is_type_pollable(&self, defs: &Definitions) -> bool{
         match self{
             Type::IncompleteAlias(def) => {
-                match &defs.get_definition(*def).def{
+                match &defs.get_definition_immut(*def).def{
                     DefinitionInner::Alias(ty) => ty.clone().is_type_pollable(defs),
                     _ => unreachable!()
                 }
@@ -214,6 +363,49 @@ impl Type{
             Type::Logic(_) => true,
             Type::GenericParam(_) => todo!(),
             Type::Inferable => panic!("Type must be known by this point"),
+            _ => false,
+        }
+    }
+
+    pub fn has_destructor(&self, defs: &Definitions) -> bool{
+        match self{
+            Type::IncompleteAlias(def) => {
+                match &defs.get_definition_immut(*def).def{
+                    DefinitionInner::Alias(ty) => ty.clone().has_destructor(defs),
+                    _ => unreachable!()
+                }
+            }
+            Type::UserDef(defid) => {
+                if self.is_type_copy(defs){
+                    return false; // `impl Copy` is mutex with `impl Drop` like in rust. 
+                    // this is to avoid being recursive when it's impossible
+                }
+
+                if defs.lang_items.get(&LangItem::ManuallyDrop)==Some(defid){
+                    return false;
+                }
+
+                // TODO: check `Drop` impl
+
+                match &defs.get_definition_immut(*defid).def{
+                    DefinitionInner::UserType(UserType::Union(_)) => false,
+                    DefinitionInner::UserType(UserType::Enum(en)) => {
+                        en.iter().any(|variant|{
+                            match &variant.ctor{
+                                Constructor::Unit => false,
+                                Constructor::Struct(fields) => fields.iter().any(|field| field.ty.has_destructor(defs)),
+                                Constructor::Tuple(fields) => fields.iter().any(|field| field.ty.has_destructor(defs))
+                            }
+                        })
+                    }
+                    DefinitionInner::UserType(UserType::Struct(ctor)) => match ctor{
+                        Constructor::Unit => false,
+                        Constructor::Struct(fields) => fields.iter().any(|field| field.ty.has_destructor(defs)),
+                        Constructor::Tuple(fields) => fields.iter().any(|field| field.ty.has_destructor(defs))
+                    }
+                    _ => unreachable!()
+                }
+            },
             _ => false,
         }
     }
@@ -503,8 +695,9 @@ impl ConstVal{
 #[derive(Clone, Debug)]
 pub struct Module {
     parent: DefId,
-    types: HashMap<String, DefId>,
-    values: HashMap<String, DefId>,
+    types: FxHashMap<String, DefId>,
+    values: FxHashMap<String, DefId>,
+    impl_blocks: FxHashMap<DefId, Vec<DefId>>,
 }
 
 #[derive(Clone, Debug)]
@@ -641,6 +834,10 @@ impl Definitions {
                 f.write_str(" */{\n")?;
                 for (name, id) in &md.types {
                     self.display_item(defid, *id, name, f)?;
+                    f.write_str("\n")?;
+                }
+                for id in md.impl_blocks.values().flatten(){
+                    self.display_item(defid, *id, "/*IMPL BLK THIS SHOULD NOT APPEAR*/", f)?;
                     f.write_str("\n")?;
                 }
                 for (name, id) in &md.values {
@@ -902,6 +1099,101 @@ impl Definitions {
                 ty.fmt(f)?;
                 f.write_str(";")
             },
+            DefinitionInner::IncompleteTrait => {
+                f.write_str("trait ")?;
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str("*/")?;
+                f.write_str("{\n/*incomplete*/\n}")
+            },
+            DefinitionInner::FunctionDecl(fnty) => {
+                if fnty.constness == Mutability::Const {
+                    f.write_str("const ")?;
+                }
+
+                if fnty.safety == Safety::Unsafe {
+                    f.write_str("unsafe ")?;
+                }
+
+                match fnty.async_ty {
+                    AsyncFnTy::Normal => f.write_str("fn ")?,
+                    AsyncFnTy::Async => f.write_str("async fn ")?,
+                    AsyncFnTy::Entity => f.write_str("entity ")?,
+                    AsyncFnTy::Procedure => f.write_str("proc ")?,
+                }
+
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str(" */")?;
+
+                f.write_str("(")?;
+
+                let mut sep = "";
+
+                for (i, ty) in fnty.params.iter().enumerate() {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    f.write_fmt(format_args!("_{}: {}", i, ty))?;
+                }
+                f.write_str(") -> ")?;
+                fnty.retty.fmt(f)?;
+                f.write_str(";")
+            },
+            DefinitionInner::Trait(body) => {
+
+                if let Safety::Unsafe = body.safety{
+                    f.write_str("unsafe ")?;
+                }
+
+                if body.is_auto{
+                    f.write_str("auto ")?;
+                }
+
+                f.write_str("trait ")?;
+                f.write_str(lname)?;
+                f.write_str("/* ")?;
+                defid.fmt(f)?;
+                f.write_str("*/")?;
+                f.write_str("{\n")?;
+                for (name,item) in &body.types{
+                    self.display_item(cur_mod, *item, name, f)?;
+                    f.write_str("\n")?;
+                }
+                for (name,item) in &body.values{
+                    self.display_item(cur_mod, *item, name, f)?;
+                    f.write_str("\n")?;
+                }
+                f.write_str("}")
+            },
+            DefinitionInner::ImplBlock(blk) => {
+                f.write_str("impl ")?;
+
+                if let Some(bound) = &blk.bound{
+                    bound.fmt(f)?;
+                    f.write_str(" for ")?;
+                }
+
+                blk.ty.fmt(f)?;
+
+                f.write_str(" (")?;
+                defid.fmt(f)?;
+                f.write_str(")")?;
+
+                f.write_str("{\n")?;
+
+                for (name,item) in &blk.types{
+                    self.display_item(cur_mod, *item, name, f)?;
+                    f.write_str("\n")?;
+                }
+                for (name,item) in &blk.values{
+                    self.display_item(cur_mod, *item, name, f)?;
+                    f.write_str("\n")?;
+                }
+
+                f.write_str("}")
+            },
         }
     }
 }
@@ -928,6 +1220,10 @@ impl core::fmt::Display for Definitions {
                 f.write_str("\n")?;
                 for (name, defid) in &md.types {
                     self.display_item(self.curcrate, *defid, name, f)?;
+                    f.write_str("\n")?;
+                }
+                for defid in md.impl_blocks.values().flatten(){
+                    self.display_item(self.curcrate,*defid,"/*IMPL BLK SHOULD NOT APPEAR*/",f)?;
                     f.write_str("\n")?;
                 }
                 for (name, defid) in &md.values {
@@ -959,6 +1255,10 @@ impl Definitions {
             .checked_add(1)
             .expect("More than 2^64 definitions in a program.");
         ret
+    }
+
+    pub fn get_definition_immut(&self, defid: DefId) -> &Definition{
+        self.defs.get(&defid).expect("Expected a definition")
     }
 
     pub fn get_definition(&mut self, defid: DefId) -> &mut Definition {
@@ -1044,6 +1344,31 @@ impl Definitions {
             } else {
                 panic!("Expected a module for current module {:?}", cur_mod)
             }
+        }
+    }
+
+    pub fn has_invisible_fields(&self,cur_mod: DefId, st: DefId) -> bool{
+
+        let def = self.defs.get(&st).unwrap();
+
+        for attr in &def.attrs{
+            if matches_meta!(attr,non_exhaustive){
+                return true
+            }else if matches_meta!(attr,non_exhaustive(priv)){
+                return true
+            }
+        }
+
+        match &def.def{
+            DefinitionInner::UserType(UserType::Struct(ctor)) => {
+                match ctor{
+                    Constructor::Unit => false,
+                    Constructor::Tuple(fields) => !fields.iter().map(|field|field.visible_from).any(|vis| self.visible_from(cur_mod, vis)),
+                    Constructor::Struct(fields) => !fields.iter().map(|field|field.visible_from).any(|vis| self.visible_from(cur_mod, vis))
+                }
+            }
+            DefinitionInner::UserType(UserType::Union(fields)) => !fields.iter().map(|field|field.visible_from).any(|vis| self.visible_from(cur_mod, vis)),
+            _ => panic!("Expected a type for {}",st)
         }
     }
 
@@ -1190,6 +1515,20 @@ impl Definitions {
 
         self.defs.get_mut(&defid)
     }
+
+    pub fn insert_impl_block(&mut self, cur_mod: DefId, refid: DefId, blockid: DefId){
+        if let DefinitionInner::Module(md) = &mut self.get_definition(cur_mod).def{
+            md.impl_blocks.entry(refid).or_default().push(blockid)
+        }else{
+            panic!("Expected a module for {}",cur_mod)
+        }
+    }
+
+    pub fn allocate_anon_def(&mut self, def: Definition) -> DefId{
+        let defid = self.next_defid();
+        self.defs.insert(defid,def);
+        defid
+    }
 }
 
 pub fn convert_visibility(
@@ -1228,8 +1567,9 @@ pub fn collect_submods(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
             } => {
                 let inner_md = Module {
                     parent: sema_mod,
-                    types: HashMap::new(),
-                    values: HashMap::new(),
+                    types: FxHashMap::with_hasher(Default::default()),
+                    values: FxHashMap::with_hasher(Default::default()),
+                    impl_blocks: FxHashMap::with_hasher(Default::default()),
                 };
 
                 let visible_from = convert_visibility(defs, sema_mod, vis).unwrap_or(DefId(0));
@@ -1365,6 +1705,120 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
                     }
                 }
             }
+            parse::Item::Trait { attrs, vis, safety, auto, name, body , ..} => {
+                let def = DefinitionInner::IncompleteTrait; // This only exists momentarily, since we need to resolve associated types immediately.
+                let meta = attrs.clone();
+
+                let visible_from = convert_visibility(defs,sema_mod,vis).unwrap_or(sema_mod);
+
+                let def = Definition{visible_from,attrs: meta,def};
+
+                let defid = defs.insert_type(sema_mod, name, def);
+
+                for attr in attrs{
+                    match attr{
+                        Meta::KeyValue(id, val) if matches_simple_path!(id, lang) => {
+                            let name = match &**val{
+                                Meta::String(name) => name,
+                                _ => panic!("Invalid #[lang] attribute")
+                            };
+
+                            let lang = LangItem::from_item_name(name).expect("Invalid Lang Item");
+
+                            defs.lang_items.insert(lang,defid);
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut values = FxHashMap::with_hasher(Default::default());
+                let mut types = FxHashMap::with_hasher(Default::default());
+
+                match body{
+                    parse::TraitBody::Alias(_) => todo!("trait alias"),
+                    parse::TraitBody::Block(items) => {
+                        for item in items{
+                            todo!("items")
+                        }
+                    },
+                }
+
+                let newdef = DefinitionInner::Trait(TraitDef{
+                    safety: *safety,
+                    is_auto: *auto,
+                    supertraits: Vec::new(),
+                    types,
+                    values,
+                });
+
+                defs.get_definition(defid).def = newdef;
+            }
+            parse::Item::Impl {
+                attrs,
+                safety,
+                ty,
+                body,
+                tr,
+                ..
+            } => {
+                let meta = attrs.clone();
+
+                let mut lang = None;
+                for attr in attrs{
+                    match attr{
+                        Meta::KeyValue(name, val) if matches_simple_path!(name,lang) => {
+                            match &**val{
+                                Meta::String(st) => {
+                                    lang = Some(LangItem::from_item_name(st).unwrap());
+                                }
+                                m => panic!("Invalid lang attribute {}",m)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let sematy = convert_type(defs, sema_mod, ty);
+
+                let (base, bound) = if let Some(trname) = tr{
+                    let tr = defs.find_type_def(sema_mod, &trname.trait_name).unwrap(); // ignore ~const/const for now
+
+                    let def = defs.get_definition(tr);
+
+                    match &def.def{
+                        DefinitionInner::Trait(TraitDef{safety: tr_safety,..}) => {
+                            if tr_safety!=safety{
+                                panic!("Requires a {} impl for trait {}",if let Safety::Unsafe = tr_safety{"unsafe"}else{"safe"},trname.trait_name);
+                            }
+                        }
+                        _ => panic!("Not a trait {}",trname.trait_name)       
+                    }
+
+                    (tr,Some(TraitBound{opt_out: false, constness: match trname.const_kind{
+                        parse::TraitBoundConst::NoConst => None,
+                        parse::TraitBoundConst::ConstIfConst => Some(TraitBoundConst::ConstIfConst),
+                        parse::TraitBoundConst::Const => Some(TraitBoundConst::ConstIfConst),
+                    },traitdef: tr}))
+                }else{
+                    match ty{
+                        parse::Type::Name(id) => (defs.find_type_def(sema_mod,id).expect("Expected a type"),None),
+                        _ if lang.is_some() => (DefId(0),None), // the defid will be changed to that impl block later
+                        _ => panic!("Expected a nominal type")
+                    }
+                };
+
+                let blk = ImplBlock{ ty: sematy, bound, types: FxHashMap::with_hasher(Default::default()), values: FxHashMap::with_hasher(Default::default()) };
+
+                for item in body{
+                    todo!("item in impl block")
+                }
+
+                let blockid = defs.allocate_anon_def(Definition{visible_from: sema_mod,attrs: meta, def: DefinitionInner::ImplBlock(blk)});
+
+                let refid = if base==DefId(0){blockid}else{base};
+
+                defs.insert_impl_block(sema_mod, refid, blockid);
+            },
             _ => {}
         }
     }
@@ -1511,7 +1965,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
             | parse::Item::Type(_)
             | parse::Item::Adt { .. }
             | parse::Item::TypeAlias { .. } => {}
-            parse::Item::Trait { .. } => todo!("trait"),
+            parse::Item::Trait { .. } => {},
 
             parse::Item::Mod {
                 name,
@@ -1521,7 +1975,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                 let next_mod = defs.find_type_in_mod(sema_mod, name).unwrap();
                 collect_value_names(defs, md, next_mod);
             }
-            parse::Item::Impl { .. } => todo!("impl block"),
+            parse::Item::Impl { .. } => {},
             parse::Item::Static {
                 name,
                 ty,
@@ -1680,7 +2134,11 @@ pub fn convert_top_const_expr(
                             | DefinitionInner::Signal(_, _)
                             | DefinitionInner::HirFunction(_, _)
                             | DefinitionInner::ThirFunction(_, _)
-                            | DefinitionInner::MirFunction(_, _) => panic!("Not a type"),
+                            | DefinitionInner::MirFunction(_, _)
+                            | DefinitionInner::Trait(_)
+                            | DefinitionInner::IncompleteTrait
+                            | DefinitionInner::FunctionDecl(_) 
+                            | DefinitionInner::ImplBlock(_) => panic!("Not a type"),
                             DefinitionInner::Module(_) => {
                                 if let Some(val) = defs
                                     .find_val_in_mod(ty, &id)
@@ -1740,9 +2198,36 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
             | parse::Item::Const { .. }
             | parse::Item::Signal { .. }
             | parse::Item::FnDeclaration { .. } => {}
-            parse::Item::Type(_) => todo!(
-                "struct"
-            ),
+            parse::Item::Type(st) => {
+                let ctor = match &st.body{
+                    parse::StructBody::Unit => Constructor::Unit,
+                    parse::StructBody::Tuple(tup) => Constructor::Tuple(tup.into_iter().map(|field|{
+                            TupleField{visible_from: convert_visibility(defs,sema_mod,&field.vis).unwrap_or(sema_mod),attrs: field.attrs.clone(),ty: convert_type(defs,sema_mod,&field.ty)}        
+                        }).collect()),
+                    parse::StructBody::Struct(st) => Constructor::Struct(st.into_iter().map(|field| {
+                            StructField{visible_from: convert_visibility(defs,sema_mod,&field.vis).unwrap_or(sema_mod),attrs: field.attrs.clone(),ty: convert_type(defs,sema_mod,&field.ty),name: field.name.clone()}
+                        }).collect())
+                    };
+                
+                let uty = if st.tag==TypeTag::Union{
+                    match ctor{
+                        Constructor::Struct(ctor) => UserType::Union(ctor),
+                        ctor => unreachable!()
+                    }
+                }else{
+                    UserType::Struct(ctor)
+                };
+
+                let def = Definition{
+                    visible_from: convert_visibility(defs,sema_mod,&st.vis).unwrap_or(sema_mod),
+                    attrs: st.attrs.clone(),
+                    def: DefinitionInner::UserType(uty)
+                };
+
+                let defid = defs.find_type_in_mod(sema_mod, &st.name).unwrap();
+
+                *defs.get_definition(defid) = def;
+            },
             parse::Item::Mod {
                 name,
                 vis,
@@ -1864,23 +2349,29 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                 defn,
             } => todo!("Type alias"),
             parse::Item::Trait {
-                attrs,
-                vis,
-                safety,
-                auto,
-                name,
-                generics,
-                supertraits,
-                body,
-            } => todo!(),
+                name, body, ..
+            } => {
+                let def = defs.find_type_in_mod(sema_mod, name).unwrap();
+
+                match body{
+                    parse::TraitBody::Alias(_) => {},
+                    parse::TraitBody::Block(blk) => {
+                        for item in blk{
+                            todo!("item in trait block")
+                        }
+                    }
+                }
+            },
             parse::Item::Impl {
-                attrs,
-                safety,
-                generics,
                 tr,
                 ty,
                 body,
-            } => todo!("impl block"),
+                ..
+            } => {
+                if !body.is_empty(){
+                    todo!("item in impl block")
+                }
+            },
             _ => unreachable!("invalid item"),
         }
     }
@@ -1931,7 +2422,7 @@ pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                 name,
                 content,
             } => unreachable!("macro rules"),
-            parse::Item::Type(_) => todo!(),
+            parse::Item::Type(_) => {},
             parse::Item::Mod {
                 name,
                 content: Some(md),
@@ -1978,23 +2469,29 @@ pub fn convert_items(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                 defn,
             } => todo!("type alias"),
             parse::Item::Trait {
-                attrs,
-                vis,
-                safety,
-                auto,
-                name,
-                generics,
-                supertraits,
-                body,
-            } => todo!("trait"),
+                name, body, ..
+            } => {
+                let def = defs.find_type_in_mod(sema_mod, name).unwrap();
+
+                match body{
+                    parse::TraitBody::Alias(_) => {},
+                    parse::TraitBody::Block(blk) => {
+                        for item in blk{
+                            todo!("item in trait block")
+                        }
+                    }
+                }
+            },
             parse::Item::Impl {
-                attrs,
-                safety,
-                generics,
                 tr,
                 ty,
                 body,
-            } => todo!("impl"),
+                ..
+            } => {
+                if !body.is_empty(){
+                    todo!("item in impl block")
+                }
+            },
             parse::Item::Static { name, ty, init, .. } => {
                 let (mt, name) = match name {
                     Pattern::Ident(mt, name) => (*mt, name),
@@ -2061,7 +2558,9 @@ pub fn tycheck_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
                     defs,
                     localmuts: FxHashMap::with_hasher(Default::default()),
                     localtys: FxHashMap::with_hasher(Default::default()),
-                    parent: defid
+                    field_cache: FxHashMap::with_hasher(Default::default()),
+                    parent: defid,
+                    cur_mod: sema_mod
                 };
 
                 let stats = stats.into_iter().map(|stat| tycheck::tycheck_stat(&mut tyinfo, stat, false)).collect::<Result<Vec<_>,_>>().unwrap();
@@ -2119,8 +2618,9 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     let root_defid = defs.next_defid();
     let sema_mod = Module {
         parent: DefId(0),
-        types: HashMap::new(),
-        values: HashMap::new(),
+        types: FxHashMap::with_hasher(Default::default()),
+        values: FxHashMap::with_hasher(Default::default()),
+        impl_blocks: FxHashMap::with_hasher(Default::default()),
     };
     defs.defs.insert(
         root_defid,
