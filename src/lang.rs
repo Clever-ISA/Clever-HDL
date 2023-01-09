@@ -48,6 +48,7 @@ def_lang_items![
     copy: {Copy @ Trait},
     clone: {Clone @ Trait},
     drop: {Drop @ Trait},
+    destruct: {Destruct @ Trait},
     fn_once: {FnOnce @ Trait},
     fn_mut: {FnMut @ Trait},
     fn: {Fn @ Trait},
@@ -61,3 +62,9 @@ def_lang_items![
     main: {Main @ Function},
     manually_drop: {ManuallyDrop @ Struct},
 ];
+
+impl LangItem{
+    pub const fn builtin_impl_traits() -> &'static [LangItem]{
+        &[Self::Copy, Self::Clone, Self::Destruct]
+    }
+}

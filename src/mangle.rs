@@ -6,13 +6,31 @@ use crate::sema::{Type,DefId, LogicType};
 
 use fxhash::FxHashMap;
 
+
+fn hardcoded_sub(st: &[&str]) -> Option<&'static str>{
+    match st{
+        ["std"] => Some("St"),
+        _ => None
+    }
+}
+
+pub struct SubstitutionMap<'a>{
+    subtab: FxHashMap<&'a [&'a str], u32>,
+}
+
 pub struct MangleCache{
     cache: FxHashMap<DefId, String>
 }
 
+
+
 impl MangleCache{
     pub fn new() -> Self{
         Self{cache: FxHashMap::with_hasher(Default::default())}
+    }
+
+    pub fn insert_type(&mut self, name: &[&str], def: DefId) {
+        
     }
 }
 

@@ -70,9 +70,10 @@ macro_rules! matches_meta{
 use std::{
     collections::{BTreeMap, HashMap},
     convert,
+    cell::RefCell,
 };
 
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap,FxHashSet};
 
 pub use crate::parse::{AsyncFnTy, Meta, Mutability, Safety, SignalDirection};
 
@@ -110,6 +111,7 @@ impl core::fmt::Display for DefId {
 #[derive(Clone, Debug)]
 pub struct Definition {
     pub visible_from: DefId,
+    pub owning_crate: DefId,
     pub attrs: Vec<Meta>,
     pub def: DefinitionInner,
 }
@@ -333,11 +335,33 @@ pub enum Type {
 impl Type{
     pub const UNIT: Self = Self::Tuple(Vec::new());
 
+    pub fn is_context_free(&self) -> bool{
+        match self{
+            Type::UserDef(_) => true,
+            Type::IncompleteAlias(_) => true,
+            Type::IntegerType(_) => true,
+            Type::Logic(_) => true,
+            Type::Array(ty, len) => ty.is_context_free(),
+            Type::GenericParam(_) => false,
+            Type::FnPtr(fnty) => fnty.params.iter().all(Type::is_context_free)&&fnty.retty.is_context_free(),
+            Type::FnItem(_, _) => true,
+            Type::Signal(_, _, reffered) => reffered.is_context_free(),
+            Type::Tuple(tys) => tys.iter().all(Type::is_context_free),
+            Type::Never => true,
+            Type::Pointer(_, ty) => ty.is_context_free(), 
+            Type::Char => true,
+            Type::Inferable => false,
+            Type::Str => true,
+            Type::Slice(ty) => ty.is_context_free(), 
+            Type::InferableInteger => false,  
+        }
+    }
+    
     pub fn is_type_copy(&self, defs: &Definitions) -> bool{
         match self{
             Type::IncompleteAlias(def) => {
                 match &defs.get_definition_immut(*def).def{
-                    DefinitionInner::Alias(ty) => ty.clone().is_type_copy(defs),
+                    DefinitionInner::Alias(ty) => ty.is_type_copy(defs),
                     _ => unreachable!()
                 }
             }
@@ -345,10 +369,39 @@ impl Type{
             Type::Tuple(inner) => inner.iter().all(|ty|ty.is_type_copy(defs)),
             Type::IntegerType(_) | Type::Logic(_) | Type::FnPtr(_) | Type::FnItem(_, _) | Type::Char | Type::Signal(_, _, _) | Type::InferableInteger | Type::Never | Type::Pointer(_, _) => true,
             Type::Inferable => panic!("Type must be known by this point"), // `is_type_copy` should follow any replacement
-            Type::UserDef(defid) => false, // for now
-            Type::GenericParam(_) => todo!(),
+            Type::UserDef(defid) => defs.check_impls(defs.lang_items.get(&LangItem::Copy).copied().unwrap(), self).is_some(), // for now
+            Type::GenericParam(_) => todo!("generics"),
             Type::Str => false,
             Type::Slice(_) => false,
+        }
+    }
+
+    pub fn is_type_sized(&self, defs: &Definitions) -> bool{
+        match self{
+             Type::IncompleteAlias(def) => {
+                match &defs.get_definition_immut(*def).def{
+                    DefinitionInner::Alias(ty) => ty.is_type_copy(defs),
+                    _ => unreachable!()
+                }
+            }
+            Type::Tuple(inner) => inner.last().map(|ty|ty.is_type_sized(defs)).unwrap_or(true),
+            Type::Inferable => panic!("Type must be known by this point"), // `is_type_sized` should follow any replacement
+            Type::UserDef(defid) => {
+                match &defs.get_definition_immut(*defid).def{
+                    DefinitionInner::UserType(UserType::Enum(_) | UserType::Union(_)) => true,
+                    DefinitionInner::UserType(UserType::Struct(ctor)) => {
+                        match ctor{
+                            Constructor::Struct(fields) => fields.last().map(|field| field.ty.is_type_sized(defs)).unwrap_or(true),
+                            Constructor::Tuple(fields) => fields.last().map(|field| field.ty.is_type_sized(defs)).unwrap_or(true),
+                            Constructor::Unit => true,
+                        }
+                    }
+                    _ => unreachable!()
+                }
+            }
+            Type::Str => false,
+            Type::Slice(_) => false,
+            _ => true,
         }
     }
 
@@ -707,6 +760,7 @@ pub struct Definitions {
     defs: BTreeMap<DefId, Definition>,
     crates: FxHashMap<String, DefId>,
     lang_items: FxHashMap<LangItem, DefId>,
+    known_to_impl: RefCell<FxHashMap<DefId,FxHashMap<Type,Option<DefId>>>>,
 }
 
 impl Definitions {
@@ -1245,6 +1299,7 @@ impl Definitions {
             defs: BTreeMap::new(),
             crates: FxHashMap::with_hasher(Default::default()),
             lang_items: FxHashMap::with_hasher(Default::default()),
+            known_to_impl: RefCell::new(FxHashMap::with_hasher(Default::default())),
         }
     }
     pub fn next_defid(&mut self) -> DefId {
@@ -1529,6 +1584,141 @@ impl Definitions {
         self.defs.insert(defid,def);
         defid
     }
+
+    pub fn gather_associated_crates(&self, ty: &Type, list: &mut Vec<DefId>){
+        match ty{
+            Type::UserDef(defid) => list.push(self.get_definition_immut(*defid).owning_crate),
+            Type::FnItem(defid, _) => todo!(),
+            Type::Signal(_, _, ty) => self.gather_associated_crates(ty,list),
+            _ => {}
+        }
+    }
+
+    fn find_impl_in_mod(&self, trdef: DefId, ty: &Type, md: &Module) -> Option<Option<DefId>>{
+        for blkid in md.impl_blocks.get(&trdef).into_iter().flatten(){
+            match &self.get_definition_immut(*blkid).def{
+                DefinitionInner::ImplBlock(blk) => {
+                    if ty.is_context_free()&&blk.ty.eq(ty){
+                        let res = if blk.bound.as_ref().unwrap().opt_out{
+                            None
+                        }else{
+                            Some(*blkid)
+                        };
+
+                        self.known_to_impl.borrow_mut().entry(trdef).or_insert_with(Default::default).insert(ty.clone(),res);
+
+                        return Some(res);
+                    }else{
+                        todo!("Generic type")
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        for (_,mdid) in &md.types{
+            match &self.get_definition_immut(*mdid).def{
+                DefinitionInner::Module(md) => {
+                    if let Some(implref) = self.find_impl_in_mod(trdef,ty,md){
+                        return Some(implref)
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn check_impls(&self, trdef: DefId, ty: &Type) -> Option<DefId>{
+
+        if self.lang_items.get(&LangItem::Sized) == Some(&trdef){
+            return if ty.is_type_sized(self){Some(trdef)}else{None};
+        }
+
+        if let Some(implid) =  self.known_to_impl.borrow().get(&trdef).and_then(|set|set.get(ty)){
+            return *implid;
+        }
+
+        let mut assoc_crates = Vec::new();
+        self.gather_associated_crates(ty,&mut assoc_crates);
+        assoc_crates.push(self.get_definition_immut(trdef).owning_crate);
+
+        for md in assoc_crates.iter().copied().map(|def|self.get_definition_immut(def)){
+            if let DefinitionInner::Module(md) = &md.def{
+                if let Some(impldef) = self.find_impl_in_mod(trdef,ty,md){
+                    return impldef
+                }
+            }else{
+                panic!("Expected a module for crate rots")
+            }
+        }
+
+        for tr in LangItem::builtin_impl_traits(){
+            if self.lang_items.get(tr)==Some(&trdef){
+                match ty{
+                    Type::FnPtr(_) | Type::FnItem(_, _) => return Some(DefId(0)),
+                    _ => return None,
+                }
+            }
+        }
+
+        match &self.get_definition_immut(trdef).def{
+            DefinitionInner::Trait(tr) => {
+                let refid = if tr.is_auto{
+                    match ty{
+                        Type::Array(ty, _) => self.check_impls(trdef,ty),
+                        Type::Slice(ty) => self.check_impls(trdef,ty),
+                        Type::FnItem(_, _) | Type::FnPtr(_) | Type::IntegerType(_) | Type::Logic(_) | Type::Char | Type::Str | Type::Signal(_, _, _) | Type::Never => Some(trdef),
+                        Type::Inferable | Type::InferableInteger => unreachable!("type must be known by this point"),
+                        Type::Tuple(tup) if tup.iter().map(|ty|self.check_impls(trdef, ty)).all(|o|o.is_some()) => Some(trdef),
+                        Type::Tuple(_) => None,
+                        Type::UserDef(udef) => {
+                            match &self.get_definition_immut(*udef).def{
+                                DefinitionInner::UserType(UserType::Enum(ctors)) => {
+                                    if ctors.iter().map(|v| {
+                                        match &v.ctor{
+                                            Constructor::Unit => true,
+                                            // I swear clippy
+                                            Constructor::Tuple(tup) => tup.iter().map(|ty|self.check_impls(trdef, &ty.ty)).all(|o|o.is_some()),
+                                            Constructor::Struct(st) => st.iter().map(|ty|self.check_impls(trdef, &ty.ty)).all(|o|o.is_some())
+                                        }
+                                    }).all(core::convert::identity){
+                                        Some(trdef)
+                                    }else{
+                                        None
+                                    }
+                                }
+                                DefinitionInner::UserType(UserType::Struct(ctor)) => {
+                                    match ctor{
+                                        Constructor::Unit => Some(trdef),
+                                        Constructor::Tuple(tup) if tup.iter().map(|ty|self.check_impls(trdef, &ty.ty)).all(|o|o.is_some()) => Some(trdef),
+                                        Constructor::Struct(st) if st.iter().map(|ty|self.check_impls(trdef, &ty.ty)).all(|o|o.is_some()) => Some(trdef),
+                                        _ => None
+                                    }
+                                }
+                                DefinitionInner::UserType(UserType::Union(st)) if st.iter().map(|ty|self.check_impls(trdef, &ty.ty)).all(|o|o.is_some()) => Some(trdef),
+                                _ => None
+                            }    
+                        }
+                        Type::GenericParam(_) => None,
+                        Type::IncompleteAlias(alias) => unreachable!("handled above"),
+                        Type::Pointer(_,ty) => self.check_impls(trdef, ty),
+                    }
+                }else{
+                    None
+                };
+
+                self.known_to_impl.borrow_mut().entry(trdef).or_insert_with(Default::default).insert(ty.clone(),refid);
+                refid
+            },
+            _ => panic!("Expected a trait")
+        }
+        
+    }
+
+
+    
+
 }
 
 pub fn convert_visibility(
@@ -1581,6 +1771,7 @@ pub fn collect_submods(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                         attrs: md.attrs.clone(),
                         visible_from,
                         def: DefinitionInner::Module(inner_md),
+                        owning_crate: defs.curcrate,
                     },
                 );
 
@@ -1614,6 +1805,7 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
                         visible_from: vis,
                         attrs: attrs.clone(),
                         def,
+                        owning_crate: defs.curcrate,
                     },
                 );
             }
@@ -1627,6 +1819,7 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
                         visible_from: vis,
                         attrs: ty.attrs.clone(),
                         def,
+                        owning_crate: defs.curcrate,
                     },
                 );
                 for attr in &ty.attrs {
@@ -1672,6 +1865,7 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
                         visible_from: vis,
                         attrs: attrs.clone(),
                         def,
+                        owning_crate: defs.curcrate,
                     },
                 );
                 for attr in attrs {
@@ -1711,7 +1905,7 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
 
                 let visible_from = convert_visibility(defs,sema_mod,vis).unwrap_or(sema_mod);
 
-                let def = Definition{visible_from,attrs: meta,def};
+                let def = Definition{visible_from,attrs: meta,def,owning_crate: defs.curcrate,};
 
                 let defid = defs.insert_type(sema_mod, name, def);
 
@@ -1813,7 +2007,7 @@ pub fn collect_type_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId
                     todo!("item in impl block")
                 }
 
-                let blockid = defs.allocate_anon_def(Definition{visible_from: sema_mod,attrs: meta, def: DefinitionInner::ImplBlock(blk)});
+                let blockid = defs.allocate_anon_def(Definition{visible_from: sema_mod,attrs: meta, def: DefinitionInner::ImplBlock(blk), owning_crate: defs.curcrate});
 
                 let refid = if base==DefId(0){blockid}else{base};
 
@@ -1958,6 +2152,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                         visible_from: vis,
                         attrs: attrs.clone(),
                         def,
+                        owning_crate: defs.curcrate,
                     },
                 );
             }
@@ -1995,6 +2190,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                                 visible_from: vis,
                                 attrs: attrs.clone(),
                                 def,
+                                owning_crate: defs.curcrate,
                             },
                         );
                     }
@@ -2020,6 +2216,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                                 visible_from: vis,
                                 attrs: attrs.clone(),
                                 def,
+                                owning_crate: defs.curcrate,
                             },
                         );
                     }
@@ -2044,6 +2241,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                         visible_from,
                         attrs: attrs.clone(),
                         def,
+                        owning_crate: defs.curcrate,
                     },
                 );
             }
@@ -2221,7 +2419,8 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                 let def = Definition{
                     visible_from: convert_visibility(defs,sema_mod,&st.vis).unwrap_or(sema_mod),
                     attrs: st.attrs.clone(),
-                    def: DefinitionInner::UserType(uty)
+                    def: DefinitionInner::UserType(uty),
+                    owning_crate: defs.curcrate,
                 };
 
                 let defid = defs.find_type_in_mod(sema_mod, &st.name).unwrap();
@@ -2628,6 +2827,7 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
             visible_from: DefId(0),
             attrs: root_mod.attrs.clone(),
             def: DefinitionInner::Module(sema_mod),
+            owning_crate: root_defid,
         },
     );
     defs.curcrate = root_defid;
