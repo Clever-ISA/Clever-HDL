@@ -11,6 +11,34 @@ use fxhash::FxHashMap;
 #[repr(transparent)]
 pub struct Symbol(NonZeroU64);
 
+impl core::cmp::Ord for Symbol{
+    fn cmp(&self, rhs: &Self) -> core::cmp::Ordering{
+        if self==rhs{
+            core::cmp::Ordering::Equal
+        }else{
+            self.as_str().cmp(rhs.as_str())
+        }
+    }
+}
+
+impl core::cmp::PartialOrd for Symbol{
+    fn partial_cmp(&self, rhs: &Self) -> Option<core::cmp::Ordering>{
+        Some(self.cmp(rhs))
+    }
+}
+
+impl core::cmp::PartialOrd<str> for Symbol{
+    fn partial_cmp(&self, rhs: &str) -> Option<core::cmp::Ordering>{
+        self.as_str().partial_cmp(rhs)
+    }
+}
+
+impl core::cmp::PartialOrd<Symbol> for str{
+    fn partial_cmp(&self, rhs: &Symbol) -> Option<core::cmp::Ordering>{
+        self.partial_cmp(rhs.as_str())
+    }
+}
+
 impl core::cmp::PartialEq<str> for Symbol{
     fn eq(&self, other: &str) -> bool{
         self.as_str()==other
@@ -22,6 +50,7 @@ impl core::cmp::PartialEq<Symbol> for str{
         self==other.as_str()
     }
 }
+
 
 impl core::hash::Hash for Symbol{
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
