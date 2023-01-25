@@ -89,19 +89,12 @@ impl Symbol{
         }else{
             drop(rdgrd);
             let val = COUNTER.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|val|<usize>::checked_add(val, 1)).expect("Overflowed number of symbols") as u64;
-            eprintln!("Interning string: {} (#{})",st,val);
             let mut leaked = Box::leak(Box::<str>::from(st));
-
-            eprintln!("[DEBUG] Is Map Locked: {}",MAP.is_locked());
             let mut guard = MAP.write();
-            eprintln!("Entered Locked Section");
             let sym = unsafe{NonZeroU64::new_unchecked(val)};
             guard.0.insert(leaked,sym);
-            eprintln!("Inserted into intern map");
             guard.1.insert(sym,leaked);
-            eprintln!("Updated Map");
             drop(guard);
-            eprintln!("Exited Locked Section");
             Symbol(sym)
         }
     }
