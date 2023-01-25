@@ -61,6 +61,7 @@ def_lang_items![
     sync: {Sync @ Trait},
     main: {Main @ Function},
     manually_drop: {ManuallyDrop @ Struct},
+    termination: {Termination @ Trait},
 ];
 
 impl LangItem{

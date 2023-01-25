@@ -309,7 +309,7 @@ impl<'defs> ScopeTypeInfo<'defs>{
                                 super::Constructor::Struct(fields) => {
                                     for field in fields.iter(){
                                         if self.defs.visible_from(self.cur_mod, field.visible_from){
-                                            field_tys.insert(FieldName::Id(field.name.clone()),field.ty.clone());
+                                            field_tys.insert(FieldName::Id(field.name.to_string()),field.ty.clone());
                                         }
                                     }
                                 },

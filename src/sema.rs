@@ -1,6 +1,6 @@
 macro_rules! matches_simple_path{
     ($e:expr, self :: $($items:ident)::+) => {
-        ($e .root==Some($crate::parse::SimplePrefix::SelfTy))&&($e.idents.len()==[$(stringify!($items)),*].len())&&($e.idents.iter().map(|s|&**s).zip([$(stringify!($items)),*]).all(|(a,b)|a==b))
+        ($e .root==Some($crate::parse::SimplePrefix::SelfPath))&&($e.idents.len()==[$(stringify!($items)),*].len())&&($e.idents.iter().map(|s|&**s).zip([$(stringify!($items)),*]).all(|(a,b)|a==b))
     };
     ($e:expr, super :: $($items:ident)::+) => {
         ($e .root==Some($crate::parse::SimplePrefix::Super))&&($e.idents.len()==[$(stringify!($items)),*].len())&&($e.idents.iter().map(|s|&**s).zip([$(stringify!($items)),*]).all(|(a,b)|a==b))
@@ -67,6 +67,24 @@ macro_rules! matches_meta{
     }
 }
 
+macro_rules! construct_simple_path{
+    (self :: $($items:ident)::+) => {
+        $crate::parse::SimplePath{root: Some($crate::parse::SimplePrefix::SelfPath),idents: vec![$(From::from(stringify!($items))),+]}
+    };
+    (crate :: $($items:ident)::+) => {
+        $crate::parse::SimplePath{root: Some($crate::parse::SimplePrefix::Crate),idents: vec![$(From::from(stringify!($items))),+]}
+    };
+    (super :: $($items:ident)::+) => {
+        $crate::parse::SimplePath{root: Some($crate::parse::SimplePrefix::Super),idents: vec![$(From::from(stringify!($items))),+]}
+    };
+    (:: $($items:ident)::+) => {
+        $crate::parse::SimplePath{root: Some($crate::parse::SimplePrefix::Root),idents: vec![$(From::from(stringify!($items))),+]}
+    };
+    ( $($items:ident)::+) => {
+        $crate::parse::SimplePath{root: None,idents: vec![$(From::from(stringify!($items))),+]}
+    };
+}
+
 use std::{
     collections::{BTreeMap, HashMap},
     convert,
@@ -79,7 +97,8 @@ pub use crate::parse::{AsyncFnTy, Meta, Mutability, Safety, SignalDirection};
 
 use crate::{
     lang::{LangItem, LangItemTarget},
-    parse::{self, Mod, Path, Pattern, Visibility, parse_visibility, TypeTag},
+    parse::{self, Mod, Path, Pattern, Visibility, parse_visibility, TypeTag}, CrateType,
+    strings::Symbol,
 
 };
 
@@ -203,16 +222,16 @@ pub struct TraitDef{
     pub safety: Safety,
     pub is_auto: bool,
     pub supertraits: Vec<Supertrait>,
-    pub types: FxHashMap<String,DefId>,
-    pub values: FxHashMap<String,DefId>,
+    pub types: FxHashMap<Symbol,DefId>,
+    pub values: FxHashMap<Symbol,DefId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ImplBlock{
     pub ty: Type,
     pub bound: Option<TraitBound>,
-    pub types: FxHashMap<String,DefId>,
-    pub values: FxHashMap<String,DefId>,
+    pub types: FxHashMap<Symbol,DefId>,
+    pub values: FxHashMap<Symbol,DefId>,
 }
 
 #[derive(Clone, Debug)]
@@ -545,7 +564,7 @@ pub struct TupleField {
 pub struct StructField {
     pub visible_from: DefId,
     pub attrs: Vec<Meta>,
-    pub name: String,
+    pub name: Symbol,
     pub ty: Type,
 }
 
@@ -748,8 +767,8 @@ impl ConstVal{
 #[derive(Clone, Debug)]
 pub struct Module {
     parent: DefId,
-    types: FxHashMap<String, DefId>,
-    values: FxHashMap<String, DefId>,
+    types: FxHashMap<Symbol, DefId>,
+    values: FxHashMap<Symbol, DefId>,
     impl_blocks: FxHashMap<DefId, Vec<DefId>>,
 }
 
@@ -758,7 +777,7 @@ pub struct Definitions {
     nextdefid: DefId,
     curcrate: DefId,
     defs: BTreeMap<DefId, Definition>,
-    crates: FxHashMap<String, DefId>,
+    crates: FxHashMap<Symbol, DefId>,
     lang_items: FxHashMap<LangItem, DefId>,
     known_to_impl: RefCell<FxHashMap<DefId,FxHashMap<Type,Option<DefId>>>>,
 }
@@ -1327,7 +1346,7 @@ impl Definitions {
             ..
         }) = self.defs.get_mut(&targ_mod)
         {
-            md.types.insert(name.to_string(), defid);
+            md.types.insert(Symbol::intern(name), defid);
         } else {
             panic!("Expected a module for current module {:?}", targ_mod);
         }
@@ -1343,7 +1362,7 @@ impl Definitions {
             ..
         }) = self.defs.get_mut(&targ_mod)
         {
-            md.values.insert(name.to_string(), defid);
+            md.values.insert(Symbol::intern(name), defid);
         } else {
             panic!("Expected a module for current module {:?}", targ_mod);
         }
@@ -1453,7 +1472,7 @@ impl Definitions {
                     ..
                 }) = self.defs.get_mut(&cur_mod)
                 {
-                    if md.types.contains_key(first_id) {
+                    if md.types.contains_key(&**first_id) {
                         cur_mod
                     } else {
                         DefId(0)
@@ -1469,9 +1488,9 @@ impl Definitions {
                 ..
             }) = self.defs.get(&base)
             {
-                base = *md.types.get(id)?
+                base = *md.types.get(&**id)?
             } else if base == DefId(0) {
-                base = *self.crates.get(id)?
+                base = *self.crates.get(&**id)?
             } else {
                 panic!(
                     "Expected a module for current module {:?}, got {:?}",
@@ -1518,7 +1537,7 @@ impl Definitions {
                             ..
                         }) = self.defs.get_mut(&cur_mod)
                         {
-                            if md.types.contains_key(id) {
+                            if md.types.contains_key(&**id) {
                                 cur_mod
                             } else {
                                 DefId(0)
@@ -1542,9 +1561,9 @@ impl Definitions {
                         ..
                     }) = self.defs.get(&base)
                     {
-                        base = *md.types.get(id)?
+                        base = *md.types.get(&**id)?
                     } else if base == DefId(0) {
-                        base = *self.crates.get(id)?
+                        base = *self.crates.get(&**id)?
                     } else {
                         panic!(
                             "Expected a module for current module {:?}, got {:?}",
@@ -1598,16 +1617,18 @@ impl Definitions {
         for blkid in md.impl_blocks.get(&trdef).into_iter().flatten(){
             match &self.get_definition_immut(*blkid).def{
                 DefinitionInner::ImplBlock(blk) => {
-                    if ty.is_context_free()&&blk.ty.eq(ty){
-                        let res = if blk.bound.as_ref().unwrap().opt_out{
-                            None
-                        }else{
-                            Some(*blkid)
-                        };
-
-                        self.known_to_impl.borrow_mut().entry(trdef).or_insert_with(Default::default).insert(ty.clone(),res);
-
-                        return Some(res);
+                    if ty.is_context_free(){
+                        if blk.ty.eq(ty){
+                            let res = if blk.bound.as_ref().unwrap().opt_out{
+                                None
+                            }else{
+                                Some(*blkid)
+                            };
+    
+                            self.known_to_impl.borrow_mut().entry(trdef).or_insert_with(Default::default).insert(ty.clone(),res);
+    
+                            return Some(res);
+                        }
                     }else{
                         todo!("Generic type")
                     }
@@ -2145,7 +2166,7 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                 };
                 let def = DefinitionInner::IncompleteFunction(sig);
 
-                defs.insert_value(
+                let defid = defs.insert_value(
                     sema_mod,
                     name,
                     Definition {
@@ -2155,6 +2176,22 @@ pub fn collect_value_names(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefI
                         owning_crate: defs.curcrate,
                     },
                 );
+
+                for attr in attrs{
+                    if matches!(attr,main){
+                        defs.lang_items.insert(LangItem::Main,defid);
+                    }else{
+                        match attr{
+                            Meta::KeyValue(id, value) if matches_simple_path!(id,lang) => {
+                                match &**value{
+                                    Meta::String(lang) => {defs.lang_items.insert(LangItem::from_item_name(lang).unwrap(),defid);},
+                                    m => panic!("Invalid value for #[lang] attribute {}",m)
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
             parse::Item::MacroRules { .. }
             | parse::Item::Type(_)
@@ -2270,7 +2307,7 @@ pub fn convert_top_const_expr(
                             ..
                         } = defs.get_definition(cur_mod)
                         {
-                            ConstVal::ConstDef(md.values[&id])
+                            ConstVal::ConstDef(md.values[&*id])
                         } else {
                             unreachable!()
                         }
@@ -2403,7 +2440,7 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                             TupleField{visible_from: convert_visibility(defs,sema_mod,&field.vis).unwrap_or(sema_mod),attrs: field.attrs.clone(),ty: convert_type(defs,sema_mod,&field.ty)}        
                         }).collect()),
                     parse::StructBody::Struct(st) => Constructor::Struct(st.into_iter().map(|field| {
-                            StructField{visible_from: convert_visibility(defs,sema_mod,&field.vis).unwrap_or(sema_mod),attrs: field.attrs.clone(),ty: convert_type(defs,sema_mod,&field.ty),name: field.name.clone()}
+                            StructField{visible_from: convert_visibility(defs,sema_mod,&field.vis).unwrap_or(sema_mod),attrs: field.attrs.clone(),ty: convert_type(defs,sema_mod,&field.ty),name: Symbol::intern(&field.name)}
                         }).collect())
                     };
                 
@@ -2518,7 +2555,7 @@ pub fn convert_types(defs: &mut Definitions, ast_mod: &Mod, sema_mod: DefId) {
                                     let attrs = field.attrs.clone();
                                     let visible_from = DefId(0); // all enum fields are pub by default
                                     let ty = convert_type(defs, sema_mod, &field.ty);
-                                    let name = field.name.to_string();
+                                    let name = Symbol::intern(&field.name);
                                     sema_fields.push(StructField {
                                         visible_from,
                                         attrs,
@@ -2813,7 +2850,20 @@ pub fn lower_crate(defs: &mut Definitions, sema_mod: DefId, ast_mod: &Mod){
     }
 }
 
-pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
+pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod, crty: CrateType) {
+    let mut is_no_main = false;
+    for meta in &root_mod.attrs{
+        if matches_meta!(meta,no_main){
+            is_no_main = true;
+        }else{
+            match meta{
+                Meta::Group(id, inner) if matches_simple_path!(id,feature) => {
+                    // TODO: populate unstable context 
+                }
+                _ => {}
+            }
+        }
+    }
     let root_defid = defs.next_defid();
     let sema_mod = Module {
         parent: DefId(0),
@@ -2838,4 +2888,55 @@ pub fn analyze_crate(defs: &mut Definitions, root_mod: &Mod) {
     convert_items(defs, root_mod, root_defid);
     tycheck_crate(defs, root_defid, root_mod);
     lower_crate(defs,root_defid,root_mod);
+    if let CrateType::Bin = crty{
+        if !is_no_main{
+            let main_def = defs.lang_items.get(&LangItem::Main).copied().unwrap_or_else(||{
+                if let DefinitionInner::Module(md) = &defs.get_definition_immut(root_defid).def{
+                    for (name,defid) in &md.values{
+                        if name=="main"{
+                            return *defid
+                        }
+                    }
+                    panic!("No main procedure")
+                }else{
+                    unreachable!()
+                }
+            });
+
+            let term_trait = defs.lang_items.get(&LangItem::Termination).copied().unwrap();
+
+            let fnty = match &defs.get_definition_immut(main_def).def{
+                DefinitionInner::MirFunction(fnty, _) if defs.check_impls(term_trait, &fnty.retty).is_some()&&fnty.params.is_empty()&&matches!(fnty.async_ty,AsyncFnTy::Procedure | AsyncFnTy::Entity) => {
+                    fnty.clone()
+                }
+                _ => panic!("Invalid function for main {}",main_def)
+            };
+
+            let ty = Type::FnItem(main_def, fnty);
+
+
+            let mut mirblocks = Vec::new();
+
+            let mut unbuilt = mir::UnbuiltBasicBlock{
+                id: 0,
+                stats: Vec::new(),
+            };
+
+            mirblocks.push(unbuilt.build_and_reset(mir::SsaTerminator::TailCall(mir::SsaTailcall{
+                func: mir::SsaExpr{ty,cat: tycheck::ValueCategory::Value,inner: mir::SsaExprInner::Const(ConstVal::ConstDef(main_def))},
+                args: Vec::new()
+            })));
+
+            let def = DefinitionInner::MirFunction(FunctionType{async_ty: AsyncFnTy::Entity,safety: Safety::Safe, constness: Mutability::Mut,params: vec![], retty: Box::new(Type::Never)}, mirblocks);
+
+            let def = Definition{
+                attrs: vec![Meta::Ident(construct_simple_path!(no_mangle))],
+                visible_from: DefId(0),
+                owning_crate: root_defid,
+                def
+            };
+
+            defs.insert_value(root_defid, "__lccc_main", def);
+        }
+    }
 }

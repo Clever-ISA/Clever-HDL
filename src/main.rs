@@ -7,12 +7,20 @@ pub mod utils;
 pub mod opt;
 pub mod rlib;
 pub mod mangle;
+pub mod unstable;
+pub mod strings;
 
 use std::{io::Read, path::PathBuf};
 
 use expander::ModuleSearch;
 
 use crate::sema::{analyze_crate, Definitions};
+
+pub enum CrateType{
+    Bin,
+    RLib,
+    Ar,
+}
 
 macro_rules! unwrap_or_error{
     ($val:expr, $($fmt:tt)*) => {
@@ -146,7 +154,7 @@ fn main() {
 
     let mut defs = Definitions::new();
 
-    analyze_crate(&mut defs, &file);
+    analyze_crate(&mut defs, &file,CrateType::Bin);
 
     println!("All definitions:\n {}", defs);
 }

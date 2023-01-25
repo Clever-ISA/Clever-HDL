@@ -6,6 +6,8 @@ use crate::lex::{GroupType, IdentifierKind, Lexeme, TokenType};
 
 pub use crate::lex::{CharType, StrType};
 
+use crate::strings::Symbol;
+
 use std::fmt::{self, Display, Formatter};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]

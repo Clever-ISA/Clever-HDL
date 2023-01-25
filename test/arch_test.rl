@@ -39,12 +39,17 @@ impl Copy for Foo{}
 pub static FOO: LogicTristate = LogicTristate::One;
 pub const BAR: i13 = 2048;
 
+#[lang = "termination"]
+pub trait Termination{}
+
+impl Termination for (){}
+impl Termination for !{}
 
 pub signal in G_CLOCK: bool;
 
 
 
-pub proc main(){
+pub proc main() -> !{
     let x = Foo{x: Logic1364::HighImpedence};
     loop{G_CLOCK.await falling_edge}
 }
