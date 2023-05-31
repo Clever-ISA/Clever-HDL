@@ -9,6 +9,7 @@ pub mod rlib;
 pub mod mangle;
 pub mod unstable;
 pub mod strings;
+pub mod irgen;
 
 use std::{io::Read, path::PathBuf};
 
